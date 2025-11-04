@@ -22,7 +22,7 @@
 
   inputs = {
     #TODO: carrying the extra patch(es) until merged to unstable
-    nixpkgs.url = "github:tiiuae/nixpkgs/britty-gst-python";
+    nixpkgs.url = "github:tiiuae/nixpkgs/first-november-bump";
     #nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
 
     # A framework for testing ghaf configurations
@@ -125,7 +125,7 @@
     # Nvidia Orin support for NixOS
     jetpack-nixos = {
       #url = "github:anduril/jetpack-nixos";
-      url = "github:tiiuae/jetpack-nixos/another-fix-kernel";
+      url = "github:tiiuae/jetpack-nixos/another-fix-kernel-rebased";
       inputs.nixpkgs.follows = "nixpkgs";
     };
 
@@ -186,12 +186,17 @@
   outputs =
     inputs@{ flake-parts, ... }:
     let
-      lib = import ./lib.nix { inherit inputs; };
+      # Create the extended lib
+      ghafLib = import ./lib.nix { inherit inputs; };
+      extendedLib = inputs.nixpkgs.lib.extend ghafLib;
     in
     flake-parts.lib.mkFlake
       {
         inherit inputs;
-        specialArgs = { inherit lib; };
+        # Pass the extended lib via specialArgs for immediate access
+        specialArgs = {
+          lib = extendedLib;
+        };
       }
       {
         # Toggle this to allow debugging in the repl
@@ -205,6 +210,7 @@
 
         imports = [
           ./overlays/flake-module.nix
+          ./lib/builders/flake-module.nix
           ./modules/flake-module.nix
           ./nix/flake-module.nix
           ./packages/flake-module.nix
@@ -214,6 +220,7 @@
           ./tests/flake-module.nix
         ];
 
-        flake.lib = lib;
+        # Export the extended lib for explicit use
+        flake.lib = extendedLib;
       };
 }

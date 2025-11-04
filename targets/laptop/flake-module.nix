@@ -11,8 +11,14 @@
 let
   system = "x86_64-linux";
 
-  laptop-configuration = import ./laptop-configuration-builder.nix { inherit lib self inputs; };
-  laptop-installer = import ./laptop-installer-builder.nix { inherit lib self inputs; };
+  laptop-configuration = self.builders.mkLaptopConfiguration {
+    inherit self inputs;
+    inherit (self) lib;
+  };
+  laptop-installer = self.builders.mkLaptopInstaller {
+    inherit self;
+    inherit (self) lib;
+  };
 
   # setup some commonality between the configurations
   commonModules = [
@@ -41,11 +47,23 @@ let
       }
     )
   ];
-
   target-configs = [
+    # keep-sorted start skip_lines=1 block=yes newline_separated=yes by_regex=laptop-configuration\s*"(.*)"
     # Laptop Debug configurations
-    (laptop-configuration "lenovo-x1-carbon-gen10" "debug" (withCommonModules [
-      self.nixosModules.hardware-lenovo-x1-carbon-gen10
+    (laptop-configuration "alienware-m18-R2" "debug" (withCommonModules [
+      self.nixosModules.hardware-alienware-m18-r2
+      {
+        ghaf = {
+          reference.profiles.mvp-user-trial.enable = true;
+          partitioning.disko.enable = true;
+          profiles.graphics.idleManagement.enable = false;
+          profiles.graphics.allowSuspend = false;
+        };
+      }
+    ]))
+
+    (laptop-configuration "dell-latitude-7230" "debug" (withCommonModules [
+      self.nixosModules.hardware-dell-latitude-7230
       {
         ghaf = {
           reference.profiles.mvp-user-trial.enable = true;
@@ -53,8 +71,9 @@ let
         };
       }
     ]))
-    (laptop-configuration "lenovo-x1-carbon-gen11" "debug" (withCommonModules [
-      self.nixosModules.hardware-lenovo-x1-carbon-gen11
+
+    (laptop-configuration "dell-latitude-7330" "debug" (withCommonModules [
+      self.nixosModules.hardware-dell-latitude-7330
       {
         ghaf = {
           reference.profiles.mvp-user-trial.enable = true;
@@ -62,24 +81,18 @@ let
         };
       }
     ]))
-    (laptop-configuration "lenovo-x1-carbon-gen12" "debug" (withCommonModules [
-      self.nixosModules.hardware-lenovo-x1-carbon-gen12
+
+    (laptop-configuration "demo-tower-mk1" "debug" (withCommonModules [
+      self.nixosModules.hardware-demo-tower-mk1
       {
         ghaf = {
           reference.profiles.mvp-user-trial.enable = true;
           partitioning.disko.enable = true;
+          profiles.graphics.idleManagement.enable = false;
         };
       }
     ]))
-    (laptop-configuration "lenovo-x1-carbon-gen13" "debug" (withCommonModules [
-      self.nixosModules.hardware-lenovo-x1-carbon-gen13
-      {
-        ghaf = {
-          reference.profiles.mvp-user-trial.enable = true;
-          partitioning.disko.enable = true;
-        };
-      }
-    ]))
+
     (laptop-configuration "lenovo-x1-2-in-1-gen9" "debug" (withCommonModules [
       self.nixosModules.hardware-lenovo-x1-2-in-1-gen9
       {
@@ -96,6 +109,47 @@ let
         };
       }
     ]))
+
+    (laptop-configuration "lenovo-x1-carbon-gen10" "debug" (withCommonModules [
+      self.nixosModules.hardware-lenovo-x1-carbon-gen10
+      {
+        ghaf = {
+          reference.profiles.mvp-user-trial.enable = true;
+          partitioning.disko.enable = true;
+        };
+      }
+    ]))
+
+    (laptop-configuration "lenovo-x1-carbon-gen11" "debug" (withCommonModules [
+      self.nixosModules.hardware-lenovo-x1-carbon-gen11
+      {
+        ghaf = {
+          reference.profiles.mvp-user-trial.enable = true;
+          partitioning.disko.enable = true;
+        };
+      }
+    ]))
+
+    (laptop-configuration "lenovo-x1-carbon-gen12" "debug" (withCommonModules [
+      self.nixosModules.hardware-lenovo-x1-carbon-gen12
+      {
+        ghaf = {
+          reference.profiles.mvp-user-trial.enable = true;
+          partitioning.disko.enable = true;
+        };
+      }
+    ]))
+
+    (laptop-configuration "lenovo-x1-carbon-gen13" "debug" (withCommonModules [
+      self.nixosModules.hardware-lenovo-x1-carbon-gen13
+      {
+        ghaf = {
+          reference.profiles.mvp-user-trial.enable = true;
+          partitioning.disko.enable = true;
+        };
+      }
+    ]))
+
     (laptop-configuration "lenovo-x1-extras" "debug" (withCommonModules [
       self.nixosModules.hardware-lenovo-x1-carbon-gen11
       {
@@ -105,6 +159,7 @@ let
         };
       }
     ]))
+
     (laptop-configuration "lenovo-x1-gen11-hardening" "debug" (withCommonModules [
       self.nixosModules.hardware-lenovo-x1-carbon-gen11
       {
@@ -115,55 +170,7 @@ let
         };
       }
     ]))
-    (laptop-configuration "dell-latitude-7230" "debug" (withCommonModules [
-      self.nixosModules.hardware-dell-latitude-7230
-      {
-        ghaf = {
-          reference.profiles.mvp-user-trial.enable = true;
-          partitioning.disko.enable = true;
-        };
-      }
-    ]))
-    (laptop-configuration "dell-latitude-7330" "debug" (withCommonModules [
-      self.nixosModules.hardware-dell-latitude-7330
-      {
-        ghaf = {
-          reference.profiles.mvp-user-trial.enable = true;
-          partitioning.disko.enable = true;
-        };
-      }
-    ]))
-    (laptop-configuration "alienware-m18-R2" "debug" (withCommonModules [
-      self.nixosModules.hardware-alienware-m18-r2
-      {
-        ghaf = {
-          reference.profiles.mvp-user-trial.enable = true;
-          partitioning.disko.enable = true;
-          profiles.graphics.idleManagement.enable = false;
-          profiles.graphics.allowSuspend = false;
-        };
-      }
-    ]))
-    (laptop-configuration "demo-tower-mk1" "debug" (withCommonModules [
-      self.nixosModules.hardware-demo-tower-mk1
-      {
-        ghaf = {
-          reference.profiles.mvp-user-trial.enable = true;
-          partitioning.disko.enable = true;
-          profiles.graphics.idleManagement.enable = false;
-        };
-      }
-    ]))
-    (laptop-configuration "tower-5080" "debug" (withCommonModules [
-      self.nixosModules.hardware-tower-5080
-      {
-        ghaf = {
-          reference.profiles.mvp-user-trial.enable = true;
-          partitioning.disko.enable = true;
-          profiles.graphics.idleManagement.enable = false;
-        };
-      }
-    ]))
+
     (laptop-configuration "system76-darp11-b" "debug" (withCommonModules [
       self.nixosModules.hardware-system76-darp11-b
       {
@@ -190,7 +197,50 @@ let
       }
     ]))
 
+    (laptop-configuration "tower-5080" "debug" (withCommonModules [
+      self.nixosModules.hardware-tower-5080
+      {
+        ghaf = {
+          reference.profiles.mvp-user-trial.enable = true;
+          partitioning.disko.enable = true;
+          profiles.graphics.idleManagement.enable = false;
+        };
+      }
+    ]))
+    # keep-sorted end
+
+    # keep-sorted start skip_lines=1 block=yes newline_separated=yes by_regex=laptop-configuration\s*"(.*)"
     # Laptop Release configurations
+    (laptop-configuration "alienware-m18-R2" "release" (withCommonModules [
+      self.nixosModules.hardware-alienware-m18-r2
+      {
+        ghaf = {
+          reference.profiles.mvp-user-trial.enable = true;
+          partitioning.disko.enable = true;
+        };
+      }
+    ]))
+
+    (laptop-configuration "dell-latitude-7230" "release" (withCommonModules [
+      self.nixosModules.hardware-dell-latitude-7230
+      {
+        ghaf = {
+          reference.profiles.mvp-user-trial.enable = true;
+          partitioning.disko.enable = true;
+        };
+      }
+    ]))
+
+    (laptop-configuration "dell-latitude-7330" "release" (withCommonModules [
+      self.nixosModules.hardware-dell-latitude-7330
+      {
+        ghaf = {
+          reference.profiles.mvp-user-trial.enable = true;
+          partitioning.disko.enable = true;
+        };
+      }
+    ]))
+
     (laptop-configuration "lenovo-x1-carbon-gen10" "release" (withCommonModules [
       self.nixosModules.hardware-lenovo-x1-carbon-gen10
       {
@@ -200,6 +250,7 @@ let
         };
       }
     ]))
+
     (laptop-configuration "lenovo-x1-carbon-gen11" "release" (withCommonModules [
       self.nixosModules.hardware-lenovo-x1-carbon-gen11
       {
@@ -209,6 +260,7 @@ let
         };
       }
     ]))
+
     (laptop-configuration "lenovo-x1-carbon-gen12" "release" (withCommonModules [
       self.nixosModules.hardware-lenovo-x1-carbon-gen12
       {
@@ -218,6 +270,7 @@ let
         };
       }
     ]))
+
     (laptop-configuration "lenovo-x1-carbon-gen13" "release" (withCommonModules [
       self.nixosModules.hardware-lenovo-x1-carbon-gen13
       {
@@ -227,6 +280,7 @@ let
         };
       }
     ]))
+
     (laptop-configuration "lenovo-x1-extras" "release" (withCommonModules [
       self.nixosModules.hardware-lenovo-x1-carbon-gen11
       {
@@ -236,6 +290,7 @@ let
         };
       }
     ]))
+
     (laptop-configuration "lenovo-x1-gen11-hardening" "release" (withCommonModules [
       self.nixosModules.hardware-lenovo-x1-carbon-gen11
       {
@@ -246,33 +301,7 @@ let
         };
       }
     ]))
-    (laptop-configuration "dell-latitude-7230" "release" (withCommonModules [
-      self.nixosModules.hardware-dell-latitude-7230
-      {
-        ghaf = {
-          reference.profiles.mvp-user-trial.enable = true;
-          partitioning.disko.enable = true;
-        };
-      }
-    ]))
-    (laptop-configuration "dell-latitude-7330" "release" (withCommonModules [
-      self.nixosModules.hardware-dell-latitude-7330
-      {
-        ghaf = {
-          reference.profiles.mvp-user-trial.enable = true;
-          partitioning.disko.enable = true;
-        };
-      }
-    ]))
-    (laptop-configuration "alienware-m18-R2" "release" (withCommonModules [
-      self.nixosModules.hardware-alienware-m18-r2
-      {
-        ghaf = {
-          reference.profiles.mvp-user-trial.enable = true;
-          partitioning.disko.enable = true;
-        };
-      }
-    ]))
+
     (laptop-configuration "system76-darp11-b" "release" (withCommonModules [
       self.nixosModules.hardware-system76-darp11-b
       {
@@ -282,6 +311,7 @@ let
         };
       }
     ]))
+    # keep-sorted end
   ];
 
   # map all of the defined configurations to an installer image

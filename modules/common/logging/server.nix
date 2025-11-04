@@ -118,6 +118,14 @@ in
       }
     ];
 
+    # Local journal retention for admin-vm's own logs
+    services.journald.extraConfig = mkIf config.ghaf.logging.journalRetention.enable ''
+      MaxRetentionSec=${toString (config.ghaf.logging.journalRetention.maxRetentionDays * 86400)}
+      SystemMaxUse=${config.ghaf.logging.journalRetention.maxDiskUsage}
+      SystemMaxFileSize=100M
+      Storage=persistent
+    '';
+
     environment.etc."loki/pass" = {
       text = "ghaf";
     };
@@ -130,11 +138,11 @@ in
         }
 
         // TLS materials arrive via systemd credentials
-        local.file "tls_cert" { 
-          filename = sys.env("CREDENTIALS_DIRECTORY") + "/loki_cert" 
+        local.file "tls_cert" {
+          filename = sys.env("CREDENTIALS_DIRECTORY") + "/loki_cert"
         }
-        local.file "tls_key" { 
-          filename = sys.env("CREDENTIALS_DIRECTORY") + "/loki_key" 
+        local.file "tls_key" {
+          filename = sys.env("CREDENTIALS_DIRECTORY") + "/loki_key"
         }
         ${optionalString (cfg.tls.remoteCAFile != null) ''
           local.file "remote_ca" {
@@ -142,8 +150,8 @@ in
           }
         ''}
         ${optionalString (cfg.tls.caFile != null) ''
-          local.file "tls_ca" { 
-            filename = sys.env("CREDENTIALS_DIRECTORY") + "/loki_ca" 
+          local.file "tls_ca" {
+            filename = sys.env("CREDENTIALS_DIRECTORY") + "/loki_ca"
           }
         ''}
 

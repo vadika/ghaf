@@ -2,7 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 {
   writeShellApplication,
-  lib,
   pkgs,
   ...
 }:
@@ -134,10 +133,10 @@ writeShellApplication {
         exit 2
     fi
   '';
-  meta = with lib; {
+  meta = {
     description = "
           The application is a shell script designed to fetch a list of URLs
-      from a specified endpoint and save them to an allow list file. The script includes error 
+      from a specified endpoint and save them to an allow list file. The script includes error
       handling and retry logic to ensure robustness in various network conditions.
     ";
   };

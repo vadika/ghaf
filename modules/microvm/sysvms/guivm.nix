@@ -234,7 +234,7 @@ let
               ++ lib.optional config.ghaf.profiles.debug.enable pkgs.givc-cli
               # Packages for checking hardware acceleration
               ++ lib.optionals config.ghaf.profiles.debug.enable [
-                pkgs.glxinfo
+                pkgs.mesa-demos
                 pkgs.libva-utils
                 pkgs.glib
               ]
@@ -247,8 +247,8 @@ let
               }
               // lib.optionalAttrs config.ghaf.givc.enableTls {
                 GIVC_CA_CERT = "/run/givc/ca-cert.pem";
-                GIVC_CERT = "/run/givc/cert.pem";
-                GIVC_KEY = "/run/givc/key.pem";
+                GIVC_HOST_CERT = "/run/givc/cert.pem";
+                GIVC_HOST_KEY = "/run/givc/key.pem";
               }
             );
           };
