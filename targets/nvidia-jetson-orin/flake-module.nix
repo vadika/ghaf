@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2022-2026 TII (SSRC) and the Ghaf contributors
 # SPDX-License-Identifier: Apache-2.0
 #
-# Configuration for NVIDIA Jetson Orin AGX/NX
+#  Configuration for NVIDIA Jetson Orin AGX/NX
 #
 {
   lib,
@@ -42,6 +42,16 @@ let
     self.nixosModules.reference-host-demo-apps
     self.nixosModules.reference-profiles-orin
     self.nixosModules.profiles
+    (
+      { config, ... }:
+      {
+        ghaf.logging = {
+          enable = lib.mkForce true;
+          server.endpoint = lib.mkForce "https://loki.ghaflogs.vedenemo.dev/loki/api/v1/push";
+          listener.address = lib.mkForce config.ghaf.networking.hosts.admin-vm.ipv4;
+        };
+      }
+    )
   ];
 
   # All Orin configurations using mkGhafConfiguration
@@ -166,11 +176,26 @@ let
 
   generate-cross-from-x86_64 =
     tgt:
+    let
+      enableGivcForAgxDebug = builtins.elem tgt.name [
+        "nvidia-jetson-orin-agx-debug"
+        "nvidia-jetson-orin-agx-debug-nodemoapps"
+      ];
+    in
     tgt
     // rec {
       name = tgt.name + "-from-x86_64";
       hostConfiguration = tgt.hostConfiguration.extendModules {
-        modules = [ self.nixosModules.cross-compilation-from-x86_64 ];
+        modules = [
+          self.nixosModules.cross-compilation-from-x86_64
+        ]
+        ++ lib.optionals enableGivcForAgxDebug [
+          {
+            ghaf.givc.enable = lib.mkForce true;
+            ghaf.givc.debug = lib.mkForce false;
+            ghaf.global-config.givc.enable = lib.mkForce true;
+          }
+        ];
       };
       package = hostConfiguration.config.system.build.${hostConfiguration.config.formatAttr};
     };
