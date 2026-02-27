@@ -163,7 +163,7 @@ in
                 echo -n > temp_keyfile
                 chmod 600 temp_keyfile
                 systemd-cryptenroll --unlock-key-file=temp_keyfile \
-                  --tpm2-device=/dev/tpm0 --tpm2-pcrs="${cfg.encryption.pcrs}" \
+                  --tpm2-device=/dev/tpmrm0 --tpm2-pcrs="${cfg.encryption.pcrs}" \
                   ${lib.optionalString tpm.passthrough.enable "--tpm2-seal-key-handle=${tpm.passthrough.rootNVIndex}"} "${drivePath}"
                 rm temp_keyfile
                 ${lib.optionalString (!cfg.encryption.keepDefaultPassword) ''
