@@ -67,6 +67,10 @@ in
         }
       ];
 
+      services.udev.extraRules = ''
+        KERNEL=="tpm0", MODE="0660", GROUP="${config.security.tpm2.tssGroup or "tss"}"
+      '';
+
       microvm.qemu = {
         extraArgs =
           let

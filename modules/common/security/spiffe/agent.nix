@@ -38,6 +38,7 @@ let
     plugins {
       NodeAttestor "tpm_devid" {
         plugin_data {
+          tpm_device_path = "/dev/tpm0"
           devid_cert_path = "${cfg.tpmDevid.certPath}"
           devid_priv_path = "${cfg.tpmDevid.privPath}"
           devid_pub_path = "${cfg.tpmDevid.pubPath}"
@@ -283,7 +284,7 @@ in
           "/run/spire"
         ]
         ++ lib.optionals useTpmDevid [
-          "/dev/tpmrm0"
+          "/dev/tpm0"
         ];
       };
     };

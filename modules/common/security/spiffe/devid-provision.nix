@@ -35,6 +35,10 @@ let
       DEVID_DIR="${cfg.devidDir}"
       CSR_DIR="${cfg.csrDir}"
       CERT_DIR="${cfg.certDir}"
+      mkdir -p /run/tpm
+
+      # Provision through TPM resource manager device.
+      export TPM2TOOLS_TCTI="device:/dev/tpmrm0"
 
       mkdir -p "$DEVID_DIR"
       chmod 0750 "$DEVID_DIR"
@@ -42,101 +46,183 @@ let
 
       PRIV_BLOB="$DEVID_DIR/devid.priv"
       PUB_BLOB="$DEVID_DIR/devid.pub"
+      PUB_PEM="$DEVID_DIR/devid-pub.pem"
       CERT_FILE="$DEVID_DIR/devid.pem"
+      TSS_PUB_BLOB="$DEVID_DIR/devid.tss.pub"
+      PUB_REQ_FILE="$CSR_DIR/$VM_NAME.pub.pem"
+
+      cleanup_contexts() {
+        if [ -f "$DEVID_DIR/devid.ctx" ]; then
+          timeout 5 tpm2_flushcontext "$DEVID_DIR/devid.ctx" -Q >/dev/null 2>&1 || true
+        fi
+        if [ -f "$DEVID_DIR/primary.ctx" ]; then
+          timeout 5 tpm2_flushcontext "$DEVID_DIR/primary.ctx" -Q >/dev/null 2>&1 || true
+        fi
+        rm -f "$DEVID_DIR/primary.ctx" "$DEVID_DIR/devid.ctx" "$TSS_PUB_BLOB"
+      }
+
+      normalize_private_blob() {
+        if [ ! -f "$PRIV_BLOB" ]; then
+          return
+        fi
+
+        local priv_size priv_prefix_hex priv_prefix
+        priv_size=$(wc -c < "$PRIV_BLOB")
+        priv_prefix_hex=$(od -An -tx1 -N2 "$PRIV_BLOB" 2>/dev/null | tr -d ' \n')
+
+        if [[ "$priv_prefix_hex" =~ ^[0-9a-fA-F]{4}$ ]] && [ "$priv_size" -gt 2 ]; then
+          priv_prefix=$((16#$priv_prefix_hex))
+        else
+          priv_prefix=""
+        fi
+
+        if [ -n "$priv_prefix" ] && [ $((priv_prefix + 2)) -eq "$priv_size" ]; then
+          echo "Converting DevID private blob from TPM2B_PRIVATE to TPM2_PRIVATE"
+          if ! dd if="$PRIV_BLOB" of="$PRIV_BLOB.raw" bs=1 skip=2 status=none 2>/dev/null; then
+            echo "Failed to normalize DevID private blob"
+            echo "Falling back to join_token attestation"
+            echo "normalize-private-failed" > /run/tpm/devid-status 2>/dev/null || true
+            rm -f "$PRIV_BLOB.raw"
+            exit 0
+          fi
+          mv -f "$PRIV_BLOB.raw" "$PRIV_BLOB"
+        fi
+      }
+
+      create_srk_primary() {
+        # Match SPIRE/go-tpm SRKTemplateHighRSA as closely as possible.
+        # Fallback keeps compatibility with older tpm2-tools variants.
+        if timeout 15 tpm2_createprimary -C owner \
+          -G rsa2048:null:aes128cfb -g sha256 \
+          -a "fixedtpm|fixedparent|sensitivedataorigin|userwithauth|restricted|decrypt|noda" \
+          -c "$DEVID_DIR/primary.ctx" -Q 2>/dev/null; then
+          return 0
+        fi
+
+        timeout 15 tpm2_createprimary -C owner -c "$DEVID_DIR/primary.ctx" -Q 2>/dev/null
+      }
 
       # Check if key blobs already exist
       if [ -f "$PRIV_BLOB" ] && [ -f "$PUB_BLOB" ]; then
+        PUB_HEAD=$(od -An -tx1 -N2 "$PUB_BLOB" 2>/dev/null | tr -d ' \n')
+        if [ "$PUB_HEAD" != "0001" ] && [ "$PUB_HEAD" != "0023" ]; then
+          echo "WARNING: Existing DevID public blob is not TPMT_PUBLIC, regenerating key blobs"
+          rm -f "$PRIV_BLOB" "$PUB_BLOB" "$PUB_PEM" "$CERT_FILE" "$TSS_PUB_BLOB"
+        fi
+      fi
+
+      if [ -f "$PRIV_BLOB" ] && [ -f "$PUB_BLOB" ]; then
+        normalize_private_blob
         echo "DevID key blobs already exist for $VM_NAME"
 
-        # Still need to ensure we have a cert
-        if [ -f "$CERT_FILE" ]; then
+        # Still need to ensure we have a valid cert
+        if [ -s "$CERT_FILE" ] && openssl x509 -in "$CERT_FILE" -noout >/dev/null 2>&1; then
           echo "DevID cert already exists, skipping provisioning"
           exit 0
+        fi
+        if [ -f "$CERT_FILE" ]; then
+          echo "WARNING: Existing DevID cert is empty/invalid, regenerating"
+          rm -f "$CERT_FILE"
+        fi
+
+        if [ -f "$PUB_PEM" ]; then
+          mkdir -p "$CSR_DIR"
+          cp "$PUB_PEM" "$PUB_REQ_FILE"
+          echo "Published DevID public key request to $PUB_REQ_FILE"
+        else
+          echo "WARNING: Missing $PUB_PEM for re-signing request"
         fi
 
         echo "Key blobs exist but no cert yet, waiting for cert..."
       else
         echo "Generating DevID key for $VM_NAME..."
 
-        # Wait for a TPM hierarchy to become accessible (max 60s).
-        # Prefer endorsement hierarchy for identity attestation.
+        # Wait for owner hierarchy access (max 60s).
         TPM_READY=0
-        TPM_HIERARCHY=""
         for attempt in $(seq 1 30); do
-          if tpm2_createprimary -C endorsement -c "$DEVID_DIR/primary.ctx" -Q 2>/dev/null; then
+          if create_srk_primary; then
             TPM_READY=1
-            TPM_HIERARCHY="endorsement"
             break
           fi
-          if tpm2_createprimary -C owner -c "$DEVID_DIR/primary.ctx" -Q 2>/dev/null; then
-            TPM_READY=1
-            TPM_HIERARCHY="owner"
-            break
-          fi
-          rm -f "$DEVID_DIR/primary.ctx"
-          echo "Waiting for TPM hierarchy... ($attempt/30)"
+          cleanup_contexts
+          echo "Waiting for TPM owner hierarchy... ($attempt/30)"
           sleep 2
         done
         if [ "$TPM_READY" -eq 0 ]; then
-          TPM_ERR=$(tpm2_createprimary -C endorsement -c "$DEVID_DIR/primary.ctx" -Q 2>&1) || true
-          rm -f "$DEVID_DIR/primary.ctx"
-          echo "No TPM hierarchy accessible after 60s: $TPM_ERR"
+          echo "TPM owner hierarchy inaccessible after 60s"
           echo "Falling back to join_token attestation"
-          echo "no-hierarchy" > /run/tpm/devid-status 2>/dev/null || true
+          echo "no-owner-hierarchy" > /run/tpm/devid-status 2>/dev/null || true
           exit 0
         fi
-        echo "Using $TPM_HIERARCHY hierarchy for DevID"
 
-        # Create RSA-2048 signing key under the primary
-        tpm2_create -C "$DEVID_DIR/primary.ctx" -G rsa2048:rsassa:sha256 \
-          -u "$PUB_BLOB" -r "$PRIV_BLOB" -Q
+        KEY_CREATED=0
+        if tpm2_create -C "$DEVID_DIR/primary.ctx" -G rsa2048:rsassa-sha256 \
+          -u "$TSS_PUB_BLOB" -r "$PRIV_BLOB" -c "$DEVID_DIR/devid.ctx" -Q 2>/dev/null; then
+          KEY_CREATED=1
+          echo "DevID key created with -G rsa2048:rsassa-sha256"
+        elif tpm2_create -C "$DEVID_DIR/primary.ctx" -G rsa2048:rsassa -g sha256 \
+          -u "$TSS_PUB_BLOB" -r "$PRIV_BLOB" -c "$DEVID_DIR/devid.ctx" -Q 2>/dev/null; then
+          KEY_CREATED=1
+          echo "DevID key created with -G rsa2048:rsassa -g sha256"
+        fi
+        if [ "$KEY_CREATED" -ne 1 ]; then
+          echo "Failed to create DevID key with supported tpm2_create syntaxes"
+          echo "Falling back to join_token attestation"
+          echo "keygen-failed" > /run/tpm/devid-status 2>/dev/null || true
+          cleanup_contexts
+          exit 0
+        fi
 
-        # Load the key to get a context for CSR generation
-        tpm2_load -C "$DEVID_DIR/primary.ctx" \
-          -u "$PUB_BLOB" -r "$PRIV_BLOB" \
-          -c "$DEVID_DIR/devid.ctx" -Q
+        READPUB_OK=0
+        for _ in 1 2 3; do
+          if tpm2_readpublic -c "$DEVID_DIR/devid.ctx" -f tpmt -o "$PUB_BLOB" -Q 2>/dev/null; then
+            READPUB_OK=1
+            break
+          fi
+          sleep 1
+        done
+        if [ "$READPUB_OK" -ne 1 ]; then
+          echo "Failed to export DevID TPMT_PUBLIC blob"
+          echo "Falling back to join_token attestation"
+          echo "readpublic-tpmt-failed" > /run/tpm/devid-status 2>/dev/null || true
+          cleanup_contexts
+          exit 0
+        fi
 
-        # Extract the public key in PEM format for CSR generation
-        tpm2_readpublic -c "$DEVID_DIR/devid.ctx" -f pem -o "$DEVID_DIR/devid-pub.pem" -Q
+        normalize_private_blob
 
-        # Generate CSR using openssl with the extracted public key
-        # Note: We create a CSR with just the public key; the TPM holds the private key
-        openssl req -new -key "$DEVID_DIR/devid-pub.pem" \
-          -subj "/CN=$VM_NAME/O=Ghaf/OU=DevID" \
-          -out "$DEVID_DIR/$VM_NAME.csr" 2>/dev/null || {
-          # If openssl refuses (needs private key for signing), create a self-signed
-          # placeholder CSR using tpm2-tools + openssl collaboration
-          echo "Generating CSR via TPM-backed key..."
-          # Create a minimal CSR data structure and sign with TPM
-          openssl req -new -newkey rsa:2048 -nodes \
-            -keyout /dev/null -subj "/CN=$VM_NAME/O=Ghaf/OU=DevID" \
-            -out "$DEVID_DIR/$VM_NAME.csr" 2>/dev/null || true
-        }
+        if ! tpm2_readpublic -c "$DEVID_DIR/devid.ctx" -f pem -o "$PUB_PEM" -Q 2>/dev/null; then
+          echo "Failed to export DevID public key"
+          echo "Falling back to join_token attestation"
+          echo "readpublic-failed" > /run/tpm/devid-status 2>/dev/null || true
+          cleanup_contexts
+          exit 0
+        fi
+
+        mkdir -p "$CSR_DIR"
+        cp "$PUB_PEM" "$PUB_REQ_FILE"
+        echo "Published DevID public key request to $PUB_REQ_FILE"
 
         # Clean up transient context files
-        rm -f "$DEVID_DIR/primary.ctx" "$DEVID_DIR/devid.ctx"
+        cleanup_contexts
 
         chown root:spire "$PRIV_BLOB" "$PUB_BLOB"
         chmod 0640 "$PRIV_BLOB" "$PUB_BLOB"
+        echo "ready" > /run/tpm/devid-status 2>/dev/null || true
         echo "DevID key blobs created"
-
-        # Submit CSR to admin-vm via virtiofs
-        if [ -f "$DEVID_DIR/$VM_NAME.csr" ]; then
-          mkdir -p "$CSR_DIR"
-          cp "$DEVID_DIR/$VM_NAME.csr" "$CSR_DIR/$VM_NAME.csr"
-          echo "CSR submitted to $CSR_DIR/$VM_NAME.csr"
-        fi
       fi
 
       # Wait for signed cert from admin-vm
       echo "Waiting for signed DevID certificate..."
       for i in $(seq 1 120); do
-        if [ -f "$CERT_DIR/$VM_NAME.pem" ]; then
+        if [ -s "$CERT_DIR/$VM_NAME.pem" ] && openssl x509 -in "$CERT_DIR/$VM_NAME.pem" -noout >/dev/null 2>&1; then
           cp "$CERT_DIR/$VM_NAME.pem" "$CERT_FILE"
           chown root:spire "$CERT_FILE"
           chmod 0644 "$CERT_FILE"
           echo "DevID certificate received and stored at $CERT_FILE"
           exit 0
+        elif [ -f "$CERT_DIR/$VM_NAME.pem" ]; then
+          echo "WARNING: Signed cert for $VM_NAME is empty/invalid, waiting for refresh"
         fi
         if [ $((i % 10)) -eq 0 ]; then
           echo "Still waiting for cert... ($i/120)"
