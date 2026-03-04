@@ -689,7 +689,13 @@ rec {
         # GIVC configuration
         givc = {
           cliArgs = config.ghaf.givc.cliArgs or "";
-          enableTls = config.ghaf.givc.enableTls or false;
+          enableTls = (config.ghaf.givc.tls.mode or "none") == "static";
+          tls = {
+            mode = config.ghaf.givc.tls.mode or "static";
+            spiffeSocketPath = config.ghaf.givc.tls.spiffeSocketPath or "unix:///run/spire/agent.sock";
+            trustDomain = config.ghaf.givc.tls.trustDomain or "ghaf.internal";
+            allowedIDs = config.ghaf.givc.tls.allowedIDs or [ ];
+          };
         };
 
         # Security settings (SSH keys, etc.)

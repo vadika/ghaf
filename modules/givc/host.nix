@@ -26,36 +26,48 @@ in
     givc.host = {
       enable = true;
       inherit (config.ghaf.givc) debug;
-      transport = {
-        name = config.networking.hostName;
-        addr = config.ghaf.networking.hosts.${config.networking.hostName}.ipv4;
-        port = "9000";
+      network = {
+        agent.transport = {
+          name = config.networking.hostName;
+          addr = config.ghaf.networking.hosts.${config.networking.hostName}.ipv4;
+          port = "9000";
+        };
+        admin.transport = lib.head config.ghaf.givc.adminConfig.addresses;
+        tls = {
+          enable = config.ghaf.givc.tls.mode != "none";
+          inherit (config.ghaf.givc.tls) mode;
+          spiffeEndpoint = config.ghaf.givc.tls.spiffeSocketPath;
+          inherit (config.ghaf.givc.tls) trustDomain;
+          inherit (config.ghaf.givc.tls) allowedIDs;
+        };
       };
-      services = [
-        "reboot.target"
-        "poweroff.target"
-        "suspend.target"
-      ]
-      ++ optionals config.ghaf.services.performance.host.tuned.enable [
-        "host-powersave.service"
-        "host-balanced.service"
-        "host-performance.service"
-        "host-powersave-battery.service"
-        "host-balanced-battery.service"
-        "host-performance-battery.service"
-      ];
-      adminVm = optionalString (
-        config.ghaf.common.adminHost != null
-      ) "microvm@${config.ghaf.common.adminHost}.service";
-      systemVms = map (vmName: "microvm@${vmName}.service") config.ghaf.common.systemHosts;
-      appVms = map (vmName: "microvm@${vmName}.service") config.ghaf.common.appHosts;
-      tls.enable = config.ghaf.givc.enableTls;
-      admin = lib.head config.ghaf.givc.adminConfig.addresses;
-      enableExecModule = true;
+      capabilities = {
+        services = [
+          "reboot.target"
+          "poweroff.target"
+          "suspend.target"
+        ]
+        ++ optionals config.ghaf.services.performance.host.tuned.enable [
+          "host-powersave.service"
+          "host-balanced.service"
+          "host-performance.service"
+          "host-powersave-battery.service"
+          "host-balanced-battery.service"
+          "host-performance-battery.service"
+        ];
+        vmServices = {
+          adminVm = optionalString (
+            config.ghaf.common.adminHost != null
+          ) "microvm@${config.ghaf.common.adminHost}.service";
+          systemVms = map (vmName: "microvm@${vmName}.service") config.ghaf.common.systemHosts;
+          appVms = map (vmName: "microvm@${vmName}.service") config.ghaf.common.appHosts;
+        };
+        exec.enable = true;
+      };
     };
 
     givc.tls = {
-      enable = config.ghaf.givc.enableTls;
+      enable = config.ghaf.givc.tls.mode == "static";
       agents = lib.attrsets.mapAttrsToList (n: v: {
         name = n;
         addr = v.ipv4;

@@ -51,7 +51,7 @@ in
 
   config = lib.mkIf bootEnabled {
     # Allow systemd units to be monitored via givc
-    givc.sysvm.services = [
+    givc.sysvm.capabilities.services = lib.mkAfter [
       "greetd.service"
       "user-login.service"
     ];

@@ -21,6 +21,7 @@ let
     ;
   inherit (config.ghaf.networking) hosts;
   inherit (config.ghaf.virtualization.microvm) appvm;
+  staticGivcTls = config.ghaf.givc.tls.mode == "static";
 
   # Filter system and enabled app VMs
   appVms = lib.attrNames (filterAttrs (_: vm: vm.enable) appvm.vms);
@@ -159,7 +160,7 @@ in
             # Wait for gui-vm to reach multi-user.target. Times out after 60 seconds
             wait-for-ui = {
               description = "Wait for GuiVM startup";
-              after = [ "givc-key-setup.service" ];
+              after = lib.optionals staticGivcTls [ "givc-key-setup.service" ];
               serviceConfig = {
                 Type = "oneshot";
                 ExecStart = ''
@@ -177,10 +178,7 @@ in
             # after user has logged in and ghaf-session is active. Times out after 120 seconds
             wait-for-login = {
               description = "Wait for user login to gui-vm";
-              after = [
-                "givc-key-setup.service"
-                "system-ui.target"
-              ];
+              after = lib.optionals staticGivcTls [ "givc-key-setup.service" ] ++ [ "system-ui.target" ];
               serviceConfig = {
                 Type = "oneshot";
                 ExecStart = ''
