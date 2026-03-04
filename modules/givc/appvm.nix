@@ -15,6 +15,11 @@ let
     ;
   inherit (config.ghaf.networking) hosts;
   inherit (config.networking) hostName;
+  tlsMode = config.ghaf.global-config.givc.tls.mode or config.ghaf.givc.tls.mode;
+  tlsSpiffeSocketPath =
+    config.ghaf.global-config.givc.tls.spiffeSocketPath or config.ghaf.givc.tls.spiffeSocketPath;
+  tlsTrustDomain = config.ghaf.global-config.givc.tls.trustDomain or config.ghaf.givc.tls.trustDomain;
+  tlsAllowedIDs = config.ghaf.global-config.givc.tls.allowedIDs or config.ghaf.givc.tls.allowedIDs;
 in
 {
   _file = ./appvm.nix;
@@ -34,14 +39,24 @@ in
       enable = true;
       inherit (config.ghaf.givc) debug;
       inherit (config.ghaf.users.homedUser) uid;
-      transport = {
-        name = hostName;
-        addr = hosts.${hostName}.ipv4;
-        port = "9000";
+      network = {
+        agent.transport = {
+          name = hostName;
+          addr = hosts.${hostName}.ipv4;
+          port = "9000";
+        };
+        admin.transport = lib.head config.ghaf.givc.adminConfig.addresses;
+        tls = {
+          enable = tlsMode != "none";
+          mode = tlsMode;
+          spiffeEndpoint = tlsSpiffeSocketPath;
+          trustDomain = tlsTrustDomain;
+          allowedIDs = tlsAllowedIDs;
+        };
       };
-      inherit (cfg) applications;
-      tls.enable = config.ghaf.givc.enableTls;
-      admin = lib.head config.ghaf.givc.adminConfig.addresses;
+      capabilities = {
+        inherit (cfg) applications;
+      };
     };
     ghaf.security.audit.extraRules = [
       "-w /etc/givc/ -p wa -k givc-${hostName}"

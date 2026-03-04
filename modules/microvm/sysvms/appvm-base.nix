@@ -142,6 +142,7 @@ in
         givc = {
           enable = globalConfig.givc.enable or false;
           debug = globalConfig.givc.debug or false;
+          tls = hostConfig.givc.tls or { };
         };
         givc.appvm = {
           enable = true;

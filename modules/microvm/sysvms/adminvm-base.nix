@@ -161,6 +161,7 @@ in
     givc = {
       inherit (globalConfig.givc) enable;
       inherit (globalConfig.givc) debug;
+      tls = hostConfig.givc.tls or { };
     };
 
     # Security
