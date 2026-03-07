@@ -99,7 +99,7 @@ in
     };
 
     services.udev.extraRules = ''
-      SUBSYSTEM=="rtc", KERNEL=="rtc0", TAG+="systemd", ENV{SYSTEMD_WANTS}+="ghaf-seed-time-from-rtc@%k.service"
+      SUBSYSTEM=="rtc", KERNEL=="rtc0", TEST=="/var/lib/systemd/timesync/clock", TAG+="systemd", ENV{SYSTEMD_WANTS}+="ghaf-seed-time-from-rtc@%k.service"
     '';
 
     systemd.services."ghaf-seed-time-from-rtc@" = {
@@ -117,6 +117,11 @@ in
         max_ahead_seconds=${toString rtcSeedMaxAheadSeconds}
         min_epoch_seconds=${toString rtcSeedMinEpochSeconds}
 
+        if [ ! -e "$anchor_path" ]; then
+          echo "RTC seed skipped: $anchor_path is missing"
+          exit 0
+        fi
+
         if [ ! -r "$rtc_since_epoch_path" ]; then
           echo "RTC seed skipped: $rtc_since_epoch_path not readable"
           exit 0
@@ -133,25 +138,26 @@ in
           exit 0
         fi
 
-        anchor_epoch=0
-        if [ -e "$anchor_path" ]; then
-          anchor_epoch="$(${pkgs.coreutils}/bin/stat -c %Y "$anchor_path" 2>/dev/null || echo 0)"
-          if ! [[ "$anchor_epoch" =~ ^[0-9]+$ ]]; then
-            anchor_epoch=0
-          fi
+        anchor_epoch="$(${pkgs.coreutils}/bin/stat -c %Y "$anchor_path" 2>/dev/null || echo 0)"
+        if ! [[ "$anchor_epoch" =~ ^[0-9]+$ ]]; then
+          echo "RTC seed skipped: invalid anchor mtime '$anchor_epoch'"
+          exit 0
         fi
 
-        if [ "$anchor_epoch" -gt 0 ]; then
-          if [ "$rtc_epoch" -lt "$anchor_epoch" ]; then
-            echo "RTC seed skipped: RTC epoch $rtc_epoch is behind anchor $anchor_epoch"
-            exit 0
-          fi
+        if [ "$anchor_epoch" -le 0 ]; then
+          echo "RTC seed skipped: anchor mtime is not positive ($anchor_epoch)"
+          exit 0
+        fi
 
-          ahead_seconds=$((rtc_epoch - anchor_epoch))
-          if [ "$ahead_seconds" -gt "$max_ahead_seconds" ]; then
-            echo "RTC seed skipped: RTC ahead by $ahead_seconds seconds (> $max_ahead_seconds)"
-            exit 0
-          fi
+        if [ "$rtc_epoch" -lt "$anchor_epoch" ]; then
+          echo "RTC seed skipped: RTC epoch $rtc_epoch is behind anchor $anchor_epoch"
+          exit 0
+        fi
+
+        ahead_seconds=$((rtc_epoch - anchor_epoch))
+        if [ "$ahead_seconds" -gt "$max_ahead_seconds" ]; then
+          echo "RTC seed skipped: RTC ahead by $ahead_seconds seconds (> $max_ahead_seconds)"
+          exit 0
         fi
 
         current_epoch="$(${pkgs.coreutils}/bin/date -u +%s)"
