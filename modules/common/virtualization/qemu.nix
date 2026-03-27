@@ -11,8 +11,6 @@
   ...
 }:
 {
-  _file = ./qemu.nix;
-
   options.ghaf.virtualization.qemu = {
     package = lib.mkOption {
       type = lib.types.package;

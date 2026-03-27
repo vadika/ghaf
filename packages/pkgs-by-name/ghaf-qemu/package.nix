@@ -9,14 +9,9 @@
   lib,
   stdenv,
   qemu_kvm,
-  ...
 }:
-let
-  qemu_version = qemu_kvm.version;
-in
 qemu_kvm.overrideAttrs (
-  _final: prev:
-  (lib.optionalAttrs (lib.versionAtLeast qemu_version "10.1") {
+  _final: prev: {
     patches =
       prev.patches
       ++ [
@@ -36,8 +31,7 @@ qemu_kvm.overrideAttrs (
         ./patches/0003-hw-acpi-Introduce-the-QEMU-AC-adapter.patch
         ./patches/0004-hw-acpi-Introduce-the-QEMU-lid-button.patch
       ];
-  })
-  // {
+
     postInstall = (prev.postInstall or "") + ''
       cp contrib/ivshmem-server/ivshmem-server $out/bin
     '';

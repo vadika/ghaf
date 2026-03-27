@@ -30,7 +30,7 @@ in
     # config.ghaf.virtualization.qemu.package to avoid infinite recursion.
     ghaf.virtualization.qemu.package = pkgs.ghaf-qemu.overrideAttrs (
       _final: prev: {
-        patches = prev.patches ++ [ ./overlays/qemu/patches/0001-qemu-v8.1.3_bpmp-virt.patch ];
+        patches = prev.patches ++ [ ./patches/qemu/0001-qemu-v8.1.3_bpmp-virt.patch ];
       }
     );
 

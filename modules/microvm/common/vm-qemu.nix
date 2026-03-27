@@ -5,8 +5,6 @@
 #
 { config, inputs, ... }:
 {
-  _file = ./vm-qemu.nix;
-
   imports = [ inputs.self.nixosModules.ghaf-qemu ];
 
   microvm.qemu.package = config.ghaf.virtualization.qemu.package;
