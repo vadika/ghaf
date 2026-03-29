@@ -270,9 +270,9 @@ let
     ];
     text = ''
       set -x
-      DISK="/dev/mmcblk0"
-      PART_NUM=1
-      PART_DEV="/dev/mmcblk0p1"
+      DISK=${if cfg.somType == "nx" then "/dev/sda" else "/dev/mmcblk0"}
+      PART_NUM=${if cfg.somType == "nx" then "2" else "1"}
+      PART_DEV=${if cfg.somType == "nx" then "/dev/sda2" else "/dev/mmcblk0p1"}
       RESIZE_MARKER=".ghaf-resize-done"
       ESP_MOUNT="/mnt-esp"
 
@@ -413,6 +413,12 @@ in
     diskEncryption = {
       enable = mkEnableOption "generic LUKS root filesystem encryption for eMMC APP partition";
 
+      passphrase = mkOption {
+        description = "Disk encryption password";
+        type = types.str;
+        default = "ghaf";
+      };
+      
       mode = mkOption {
         description = "Disk encryption mode for Jetson root filesystem";
         type = types.enum [ "generic-luks-passphrase" ];
@@ -552,7 +558,7 @@ in
       );
       luks.devices = lib.mkIf cfg.diskEncryption.enable {
         ${cfg.diskEncryption.mapperName} = {
-          device = "/dev/mmcblk0p1";
+          device = if cfg.somType == "nx" then "/dev/sda2" else "/dev/mmcblk0p1";
           allowDiscards = true;
         };
       };
