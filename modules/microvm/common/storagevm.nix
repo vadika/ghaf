@@ -263,7 +263,7 @@ in
       # Remove systemd-machine-id-commit service
       systemd.suppressedSystemUnits = [ "systemd-machine-id-commit.service" ];
     })
-    (lib.mkIf (config.ghaf.givc.enable && config.ghaf.givc.enableTls) {
+    (lib.mkIf (config.ghaf.givc.enable && (config.ghaf.global-config.givc.enableTls or false)) {
       virtualisation.fileSystems.${cfg.mountPath} = {
         device = "/dev/disk/by-label/givc-${cfg.name}";
       };

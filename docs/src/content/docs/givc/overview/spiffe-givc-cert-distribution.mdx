@@ -1,0 +1,263 @@
+---
+title: SPIFFE Certificate Distribution for GIVC
+description: End-to-end design and operations guide for SPIFFE-based GIVC identity and certificate distribution.
+---
+{/*
+SPDX-FileCopyrightText: 2022-2026 TII (SSRC) and the Ghaf contributors
+SPDX-License-Identifier: CC-BY-SA-4.0
+*/}
+
+# SPIFFE Certificate Distribution for GIVC
+
+This document explains how Ghaf distributes and uses GIVC TLS identities in SPIFFE mode.
+It also documents the static TLS path, startup dependencies, configuration propagation, and troubleshooting.
+
+## Scope
+
+This page covers:
+
+- GIVC TLS modes (`none`, `static`, `spiffe`)
+- How certificates or SVIDs are obtained in each mode
+- How host and VM configuration is propagated
+- Operational checks to confirm the system is healthy
+- Common failure signatures and fixes
+
+This page does not cover the full SPIRE policy model in depth. It focuses on GIVC integration.
+
+## Why This Feature Exists
+
+Historically, GIVC used static PEM files mounted into VMs. That model works, but it requires key material generation and distribution via host-managed storage.
+
+SPIFFE mode replaces static cert distribution with workload-issued identities:
+
+- Each workload obtains an X.509-SVID from the local SPIRE agent
+- Trust anchors come from SPIFFE bundles
+- GIVC services authenticate peers using SPIFFE identities
+
+Benefits:
+
+- No long-lived static cert/key files required for GIVC runtime
+- Identity lifecycle can be managed by SPIRE
+- Clear trust domain and workload identity semantics
+
+## TLS Modes
+
+GIVC currently supports three modes:
+
+| Mode | Behavior | Typical Use |
+| --- | --- | --- |
+| `none` | No TLS for GIVC transport | Local/dev testing only |
+| `static` | PEM files (`ca-cert.pem`, `cert.pem`, `key.pem`) | Legacy/default compatibility |
+| `spiffe` | X.509-SVID and bundle from SPIRE Workload API | Preferred secure deployment |
+
+## High-Level Architecture
+
+### Static TLS path
+
+In static mode, host-side services generate or stage cert/key material and distribute it through VM storage/share mechanisms.
+
+Key characteristics:
+
+- Boot ordering depends on static key setup units
+- VM services read certs from `/etc/givc/*.pem` or staged equivalents
+- Missing static files break GIVC startup
+
+### SPIFFE TLS path
+
+In SPIFFE mode, workloads use the local SPIRE agent socket:
+
+- Endpoint: `unix:///run/spire/agent.sock`
+- Trust domain: usually `ghaf.internal`
+- Identities: issued as X.509-SVIDs
+
+GIVC components fetch identity material from SPIRE at runtime and build TLS configurations from SVID + bundle data.
+
+## Certificate/SVID Distribution Flow (SPIFFE)
+
+1. `admin-vm` runs SPIRE server and generates join tokens for host/system/app VMs.
+2. Tokens are distributed through the shared persistent path (for example `/persist/common/spire/tokens`).
+3. Each VM and host runs `spire-agent` and attests using its configured mode.
+4. GIVC services connect to local Workload API (`/run/spire/agent.sock`) and request identity material.
+5. GIVC server/client TLS stacks are built from returned SVIDs and trust bundles.
+6. GIVC control plane communication (host/sysvm/appvm/admin) uses mTLS with SPIFFE-derived credentials.
+
+## Runtime Components and Responsibilities
+
+- `givc-agent` (Go): host/sysvm/appvm GIVC transport and capability service
+- `givc-admin` (Rust): admin service and policy/control plane endpoint
+- `spire-server` (admin-vm): CA and registration authority
+- `spire-agent` (host + VMs): local workload identity source
+
+## Configuration Model
+
+### Primary Ghaf settings
+
+Set GIVC TLS mode at target/host configuration level:
+
+```nix
+ghaf.givc.tls.mode = "spiffe";
+ghaf.givc.tls.spiffeSocketPath = "unix:///run/spire/agent.sock";
+ghaf.givc.tls.trustDomain = "ghaf.internal";
+ghaf.givc.tls.allowedIDs = [ ];
+```
+
+SPIFFE framework should also be enabled:
+
+```nix
+ghaf.global-config.spiffe.enable = true;
+ghaf.global-config.spiffe.trustDomain = "ghaf.internal";
+```
+
+### Propagation model (host to VMs)
+
+Ghaf VM composition uses `globalConfig` and `hostConfig`.
+
+Important detail for GIVC TLS:
+
+- VM base modules must consume propagated host-side GIVC TLS via `hostConfig.givc.tls`
+- Relying on VM-local defaults can incorrectly revert to `static`
+
+When propagation is correct, `/etc/givc-agent/config.json` in host and VMs should all show `"mode":"spiffe"`.
+
+## Boot Ordering and Dependencies
+
+### Static mode requirements
+
+Static mode can require units such as key-setup and static cert image paths.
+
+### SPIFFE mode requirements
+
+SPIFFE mode should avoid static-cert prerequisites and instead require:
+
+- SPIRE token availability
+- SPIRE agent startup
+- Admin-vm SPIRE server and entry generation flow
+
+If static dependencies are left enabled in SPIFFE mode, VM startup can fail even though SPIFFE itself is configured.
+
+## Service-Level Health Checks
+
+Use these checks after boot.
+
+### 1) Confirm mode everywhere
+
+Check host and each relevant VM:
+
+```bash
+cat /etc/givc-agent/config.json
+```
+
+Expected:
+
+- `network.tls.mode` is `spiffe`
+- `network.tls.spiffeEndpoint` is `unix:///run/spire/agent.sock`
+- `network.tls.trustDomain` matches deployment trust domain
+
+### 2) Confirm GIVC services
+
+```bash
+systemctl status givc-ghaf-host.service
+systemctl status givc-admin.service
+systemctl status givc-admin-vm.service
+systemctl status givc-net-vm.service
+```
+
+Expected: active/running on relevant nodes.
+
+### 3) Confirm SPIRE agents
+
+```bash
+systemctl status spire-agent.service
+journalctl -u spire-agent.service -n 100 --no-pager
+```
+
+Expected:
+
+- agent attestation success
+- Workload API socket started
+
+### 4) Confirm token generation path
+
+```bash
+ls -l /persist/common/spire/tokens
+```
+
+Expected token files for host and VMs.
+
+## Common Failure Signatures
+
+### `open /etc/givc/cert.pem: no such file or directory`
+
+Meaning:
+
+- Service is still in `static` mode but static PEMs are not present
+
+Typical causes:
+
+- TLS mode not propagated into VM-local GIVC config
+- Mixed host/VM config where host is SPIFFE but VM remains static
+
+### Missing `/persist/common/spire/tokens/<node>.token`
+
+Meaning:
+
+- SPIRE join token generation/distribution did not complete before agent start
+
+Typical causes:
+
+- `admin-vm` SPIRE services not running
+- boot sequencing or upstream VM startup failure
+
+### VM fails with missing `/persist/storagevm/givc/<vm>.img`
+
+Meaning:
+
+- Static cert storage path is still required in SPIFFE mode
+
+Typical causes:
+
+- static TLS storage ordering/mount logic not correctly gated by TLS mode
+
+### `No identity issued` in SPIRE agent logs
+
+Meaning:
+
+- Workload API request does not match a SPIRE registration entry yet
+
+Notes:
+
+- May appear briefly during startup
+- Persistent messages indicate missing or incorrect workload registration/selectors
+
+## Migration Notes (Static to SPIFFE)
+
+When migrating an existing target:
+
+1. Set `ghaf.givc.tls.mode = "spiffe"`.
+2. Enable SPIFFE and align trust domain values.
+3. Ensure static key/cert service dependencies are disabled for SPIFFE mode.
+4. Ensure VM GIVC config inherits host TLS mode.
+5. Rebuild and verify `config.json` mode across host and VMs.
+
+## Security Notes
+
+- `allowedIDs` can be used to restrict accepted peer identities.
+- Trust domain consistency is critical (`ghaf.internal` or deployment-specific domain).
+- SPIFFE mode should avoid distributing long-lived private keys via shared files.
+
+## Validation Checklist
+
+Use this as release readiness criteria for the SPIFFE GIVC path:
+
+- Host GIVC mode is `spiffe`
+- Admin VM GIVC mode is `spiffe`
+- System VM GIVC mode is `spiffe`
+- `givc-admin` and all required `givc-agent` services are running
+- `spire-agent` running on host and VMs
+- Join tokens present and consumed successfully
+- No static cert path dependency errors in journals
+
+## Related Pages
+
+- [`/givc/overview/arch`](/givc/overview/arch/)
+- [`/ghaf/dev/architecture/config-propagation`](/ghaf/dev/architecture/config-propagation/)

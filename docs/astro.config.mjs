@@ -260,7 +260,14 @@ export default defineConfig({
               items: [
                 {
                   label: "Overview",
-                  items: ["givc/overview", "givc/overview/arch"],
+                  items: [
+                    "givc/overview",
+                    "givc/overview/arch",
+                    {
+                      label: "SPIFFE Certificate Distribution",
+                      link: "/givc/overview/spiffe-givc-cert-distribution/",
+                    },
+                  ],
                 },
                 {
                   label: "Getting Started",

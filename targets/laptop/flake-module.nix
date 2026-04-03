@@ -205,6 +205,10 @@ let
       extraConfig = {
         reference.profiles.mvp-user-trial.enable = true;
         partitioning.disko.enable = true;
+        givc.tls.mode = "spiffe";
+        givc.tls.trustDomain = "ghaf.internal";
+        global-config.spiffe.enable = true;
+        global-config.spiffe.trustDomain = "ghaf.internal";
       };
     })
 

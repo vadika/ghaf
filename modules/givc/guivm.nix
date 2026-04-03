@@ -18,6 +18,11 @@ let
   guivmName = "gui-vm";
   inherit (config.ghaf.networking) hosts;
   inherit (config.networking) hostName;
+  tlsMode = config.ghaf.global-config.givc.tls.mode or config.ghaf.givc.tls.mode;
+  tlsSpiffeSocketPath =
+    config.ghaf.global-config.givc.tls.spiffeSocketPath or config.ghaf.givc.tls.spiffeSocketPath;
+  tlsTrustDomain = config.ghaf.global-config.givc.tls.trustDomain or config.ghaf.givc.tls.trustDomain;
+  tlsAllowedIDs = config.ghaf.global-config.givc.tls.allowedIDs or config.ghaf.givc.tls.allowedIDs;
 in
 {
   _file = ./guivm.nix;
@@ -31,62 +36,80 @@ in
     givc.sysvm = {
       enable = true;
       inherit (config.ghaf.givc) debug;
-      transport = {
-        name = hostName;
-        addr = hosts.${hostName}.ipv4;
-        port = "9000";
+      network = {
+        agent.transport = {
+          name = hostName;
+          addr = hosts.${hostName}.ipv4;
+          port = "9000";
+        };
+        admin.transport = lib.head config.ghaf.givc.adminConfig.addresses;
+        tls = {
+          enable = tlsMode != "none";
+          mode = tlsMode;
+          spiffeEndpoint = tlsSpiffeSocketPath;
+          trustDomain = tlsTrustDomain;
+          allowedIDs = tlsAllowedIDs;
+        };
       };
-      services = [
-        "reboot.target"
-        "poweroff.target"
-      ];
-      admin = lib.head config.ghaf.givc.adminConfig.addresses;
-      tls.enable = config.ghaf.givc.enableTls;
+      capabilities = {
+        services = [
+          "reboot.target"
+          "poweroff.target"
+        ];
+        socketProxy = {
+          sockets =
+            lib.optionals (builtins.elem netvmName config.ghaf.common.vms) [
+              {
+                transport = {
+                  name = netvmName;
+                  addr = hosts.${netvmName}.ipv4;
+                  port = "9010";
+                  protocol = "tcp";
+                };
+                socket = "/tmp/dbusproxy_net.sock";
+              }
+            ]
+            ++ lib.optionals (builtins.elem audiovmName config.ghaf.common.vms) [
+              {
+                transport = {
+                  name = audiovmName;
+                  addr = hosts.${audiovmName}.ipv4;
+                  port = "9011";
+                  protocol = "tcp";
+                };
+                socket = "/tmp/dbusproxy_snd.sock";
+              }
+              (lib.optionalAttrs (audioCfg.enable && audioCfg.client.pipewireControl.enable) {
+                transport = {
+                  name = audiovmName;
+                  addr = hosts.${audiovmName}.ipv4;
+                  inherit (audioCfg.server.pipewireForwarding) port;
+                  protocol = "tcp";
+                };
+                inherit (audioCfg.client.pipewireControl) socket;
+              })
+            ];
+          enable =
+            (builtins.elem netvmName config.ghaf.common.vms)
+            || (builtins.elem audiovmName config.ghaf.common.vms);
+        };
+        eventProxy = {
+          enable = true;
+          events = [
+            {
+              transport = {
+                name = guivmName;
+                addr = hosts.${guivmName}.ipv4;
+                port = "9012";
+                protocol = "tcp";
+              };
+              producer = false;
+            }
+          ];
+        };
+      };
       enableUserTlsAccess = true;
       notifier.enable = true;
-      socketProxy =
-        lib.optionals (builtins.elem netvmName config.ghaf.common.vms) [
-          {
-            transport = {
-              name = netvmName;
-              addr = hosts.${netvmName}.ipv4;
-              port = "9010";
-              protocol = "tcp";
-            };
-            socket = "/tmp/dbusproxy_net.sock";
-          }
-        ]
-        ++ lib.optionals (builtins.elem audiovmName config.ghaf.common.vms) [
-          {
-            transport = {
-              name = audiovmName;
-              addr = hosts.${audiovmName}.ipv4;
-              port = "9011";
-              protocol = "tcp";
-            };
-            socket = "/tmp/dbusproxy_snd.sock";
-          }
-          (lib.optionalAttrs (audioCfg.enable && audioCfg.client.pipewireControl.enable) {
-            transport = {
-              name = audiovmName;
-              addr = hosts.${audiovmName}.ipv4;
-              inherit (audioCfg.server.pipewireForwarding) port;
-              protocol = "tcp";
-            };
-            inherit (audioCfg.client.pipewireControl) socket;
-          })
-        ];
-      eventProxy = [
-        {
-          transport = {
-            name = guivmName;
-            addr = hosts.${guivmName}.ipv4;
-            port = "9012";
-            protocol = "tcp";
-          };
-          producer = false;
-        }
-      ];
     };
     systemd.services.dbus-proxy-networkmanager = {
       description = "DBus proxy for Network Manager ${guivmName}";

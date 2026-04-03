@@ -327,9 +327,11 @@ in
             vmConfig != null
             && lib.hasAttr "ghaf" vmConfig
             && lib.hasAttr "givc" vmConfig.ghaf
+            && lib.hasAttr "global-config" vmConfig.ghaf
+            && lib.hasAttr "givc" vmConfig.ghaf.global-config
             && lib.hasAttr "storagevm" vmConfig.ghaf
             && (vmConfig.ghaf.givc.enable or false)
-            && (vmConfig.ghaf.givc.enableTls or false)
+            && (vmConfig.ghaf.global-config.givc.enableTls or false)
             && (vmConfig.ghaf.storagevm.enable or false)
           ) config.microvm.vms;
 

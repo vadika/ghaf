@@ -10,6 +10,7 @@ let
   inherit (lib)
     mkOption
     mkEnableOption
+    mkDefault
     mkIf
     types
     optionalString
@@ -55,6 +56,32 @@ in
       description = "Enable TLS for gRPC communication globally, or disable for debugging.";
       type = types.bool;
       default = true;
+    };
+    tls = {
+      mode = mkOption {
+        description = "TLS mode for GIVC endpoints: static, spiffe, or none.";
+        type = types.enum [
+          "static"
+          "spiffe"
+          "none"
+        ];
+        default = "static";
+      };
+      spiffeSocketPath = mkOption {
+        description = "SPIFFE Workload API socket endpoint URI.";
+        type = types.str;
+        default = "unix:///run/spire/agent.sock";
+      };
+      trustDomain = mkOption {
+        description = "SPIFFE trust domain used by GIVC workloads.";
+        type = types.str;
+        default = "ghaf.internal";
+      };
+      allowedIDs = mkOption {
+        description = "Allowed SPIFFE IDs for peer authorization.";
+        type = types.listOf types.str;
+        default = [ ];
+      };
     };
     idsExtraArgs = mkOption {
       description = "Extra arguments for applications when IDS/MITM is enabled.";
@@ -110,16 +137,35 @@ in
       in
       {
         inherit idsExtraArgs;
+        tls = {
+          mode = mkDefault (config.ghaf.global-config.givc.tls.mode or "static");
+          spiffeSocketPath = mkDefault (
+            config.ghaf.global-config.givc.tls.spiffeSocketPath or "unix:///run/spire/agent.sock"
+          );
+          trustDomain = mkDefault (config.ghaf.global-config.givc.tls.trustDomain or "ghaf.internal");
+          allowedIDs = mkDefault (config.ghaf.global-config.givc.tls.allowedIDs or [ ]);
+        };
+        enableTls = mkDefault (config.ghaf.givc.tls.mode == "static");
         appPrefix = "/run/current-system/sw/bin";
-        cliArgs = builtins.replaceStrings [ "\n" ] [ " " ] ''
-          --name ${adminAddress.name}
-          --addr ${adminAddress.addr}
-          --port ${adminAddress.port}
-          ${optionalString config.ghaf.givc.enableTls "--cacert /run/givc/ca-cert.pem"}
-          ${optionalString config.ghaf.givc.enableTls "--cert /run/givc/cert.pem"}
-          ${optionalString config.ghaf.givc.enableTls "--key /run/givc/key.pem"}
-          ${optionalString (!config.ghaf.givc.enableTls) "--notls"}
-        '';
+        cliArgs =
+          if config.ghaf.givc.tls.mode == "spiffe" then
+            builtins.replaceStrings [ "\n" ] [ " " ] ''
+              --name ${adminAddress.name}
+              --addr ${adminAddress.addr}
+              --port ${adminAddress.port}
+              --spiffe-endpoint ${config.ghaf.givc.tls.spiffeSocketPath}
+              --trust-domain ${config.ghaf.givc.tls.trustDomain}
+            ''
+          else
+            builtins.replaceStrings [ "\n" ] [ " " ] ''
+              --name ${adminAddress.name}
+              --addr ${adminAddress.addr}
+              --port ${adminAddress.port}
+              ${optionalString (config.ghaf.givc.tls.mode == "static") "--cacert /run/givc/ca-cert.pem"}
+              ${optionalString (config.ghaf.givc.tls.mode == "static") "--cert /run/givc/cert.pem"}
+              ${optionalString (config.ghaf.givc.tls.mode == "static") "--key /run/givc/key.pem"}
+              ${optionalString (config.ghaf.givc.tls.mode == "none") "--notls"}
+            '';
         # Givc admin server configuration
         adminConfig = {
           inherit (adminAddress) name;
