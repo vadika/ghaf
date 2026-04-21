@@ -208,8 +208,11 @@ in
   microvm = {
     # Optimize is disabled because when it is enabled, qemu is built without libusb
     optimize.enable = false;
-    # Sensible defaults - can be overridden via vmConfig
-    vcpu = lib.mkDefault 2;
+    # TEMPORARY (debug): bump from 2 to 4 to test whether extra guest CPU headroom
+    # absorbs audit-subsystem syscall overhead enough to keep the xhci event ring
+    # drained, as an alternative to disabling audit (see sister branch
+    # givc-logging-nvidia). Flash one branch at a time to isolate the variable.
+    vcpu = lib.mkForce 4;
     # Memory default is set to 1GB as some WiFi drivers require at least that much memory to function properly. This can be overridden via vmConfig.
     mem = lib.mkDefault 1024;
     hypervisor = "qemu";
