@@ -133,7 +133,7 @@
     # Nvidia Orin support for NixOS
     jetpack-nixos = {
       #url = "github:anduril/jetpack-nixos";
-      url = "github:tiiuae/jetpack-nixos/refactor/flash-signed-sd-image-v2";
+      url = "github:tiiuae/jetpack-nixos/march-rebase";
       inputs.nixpkgs.follows = "nixpkgs";
     };
 
