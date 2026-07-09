@@ -78,6 +78,40 @@ Two facts fall out of this:
   `Cannot get CSR clock` and `Invalid PTP clock rate` are benign — they appear on the
   working cold-booted system too.
 
+## QEMU constraints (discovered 2026-07-09, they shape everything below)
+
+**`-device vfio-platform` was removed in QEMU 10.2.** Ghaf's `qemu_kvm` is 11.0.1 and nixpkgs
+has no older attr. Upstream's reasoning: *"the vfio-platform infrastructure requires some
+adaptation at both kernel and qemu level. No such attempt has been done for years ... PCIe
+passthrough shall be the mainline solution."* Verified: `hw/vfio/platform.c` is present at
+`v10.1.5`, absent at `v10.2.0`. The **kernel** side is untouched (`CONFIG_VFIO_PLATFORM=y`,
+`/sys/bus/platform/drivers/vfio-platform` exists on the device).
+
+Consequence: net-vm's QEMU is pinned to **10.1.5**, the last release with the device, as a
+separate package `ghaf-qemu-bpmp`. Every other VM stays on nixpkgs QEMU. The pin is a
+liability — net-vm is network-facing and will not get QEMU security fixes after 10.1.x.
+
+**A passthrough device needs an FDT binding in QEMU, or QEMU exits.** `virt` allows
+`-device vfio-platform` as a dynamic sysbus device, but at machine-done
+`add_fdt_node()` walks `bindings[]` in `hw/core/sysbus-fdt.c`; the only vfio-platform entry
+matches compat `amd,xgbe-seattle-v1a`. Anything else falls through to
+`error_report("Device %s can not be dynamically instantiated"); exit(1)`. There is no
+catch-all `no_fdt_node` for vfio-platform, in 9.2, 10.1 or 11.
+
+This is almost certainly why UARTI passthrough is disabled as "broken" in
+`modules/profiles/orin.nix`, and it is why a hand-written `-dtb` never helped: QEMU exits
+before the guest runs. `tegra234-netvm.dts` is in any case a dump of one specific QEMU 8.x
+machine — one CPU, hardcoded initrd addresses, a `bootargs` naming a 23.11 store path — and
+QEMU only rewrites `/memory` and `/chosen` when given `-dtb`, never `/cpus`.
+
+Consequence: **guest device-tree nodes are emitted by QEMU, not hand-written.** The `/bpmp`
+node comes from the `nvidia_bpmp_guest` patch. MGBE0's node comes from a
+`VFIO_PLATFORM_BINDING("nvidia,tegra234-mgbe", ...)` added to `bindings[]`. Both then carry
+the GPAs and SPIs QEMU actually assigned, and there is no `-dtb` anywhere in the design.
+
+Corroboration: PR #1240's gpu-vm depends on `-device vfio-platform` too, and was written
+against QEMU 9.2. It cannot work on today's Ghaf either.
+
 ## Architecture
 
 ```

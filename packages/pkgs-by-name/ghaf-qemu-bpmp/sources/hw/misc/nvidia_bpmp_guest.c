@@ -1,7 +1,7 @@
 #include "qemu/osdep.h"
 #include "qemu/log.h"
 #include "qapi/error.h" /* provides error_fatal() handler */
-#include "hw/core/sysbus.h"	/* provides all sysbus registering func */
+#include "hw/sysbus.h"	/* provides all sysbus registering func */
 #include "hw/misc/nvidia_bpmp_guest.h"
 
 #define TYPE_NVIDIA_BPMP_GUEST "nvidia_bpmp_guest"
@@ -31,7 +31,7 @@ struct NvidiaBpmpGuestState
 
 // Device memory map:
 
-// 0x090c0000 +  /* Base address, size 0x01000 */
+// 0x090d0000 +  /* Base address, size 0x01000 */
 
 //      0x0000 \ Tx buffer
 //      0x01FF /
