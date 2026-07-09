@@ -12,6 +12,17 @@
  * wedge the host. Keep this list to exactly the resources of the devices
  * actually passed through. Do NOT widen it to "everything"; see
  * ghaf.hardware.nvidia.virtualization.bpmpAllowAllDomains.
+ *
+ * EXPECTED, and not a bug: the host proxy logs a stream of
+ *   "bpmp-host: Warning, clock not allowed for: <id>, with command: <n>"
+ * at guest boot. Those are the boundary working. The guest's clock framework
+ * probes rates (command 1, CMD_CLK_GET_RATE) and re-enables parent PLLs
+ * (command 7, CMD_CLK_ENABLE) that are already on at the host; both are refused
+ * and neither is needed -- MGBE0's own clocks (below) are what the link uses,
+ * and it comes up at 1Gbps regardless. The only casualty is PTP hardware
+ * timestamping, which wants parent-clock rate control this list deliberately
+ * withholds. Do not add the probed ids to "fix" the warnings: that reopens the
+ * path to clocks the guest could later disable.
  */
 
 /dts-v1/;
