@@ -164,9 +164,14 @@ in
         # uarta passthrough relied on 0002-bpmp-host-uarta-dts.patch, which was
         # removed along with the other stale bpmp-virt-host kernel patches.
         passthroughs.host.uarta.enable = false;
-        # TODO: uarti passthrough is currently broken, it will be enabled
-        # later after a further analysis.
+        # uarti passthrough hits QEMU's add_fdt_node(), which exits(1) for a
+        # dynamic sysbus device with no FDT binding in hw/core/sysbus-fdt.c.
+        # That is what "broken" meant. Fixing it means adding a binding, as
+        # mgbe0_net_vm does.
         passthroughs.uarti_net_vm.enable = false;
+
+        # Pass MGBE0 (ethernet@6800000) to net-vm.
+        passthroughs.mgbe0_net_vm.enable = true;
       };
 
       # Virtualization options

@@ -54,17 +54,37 @@ in
       '';
     };
 
+    sourcesPatch = lib.mkOption {
+      type = lib.types.package;
+      readOnly = true;
+      internal = true;
+      default = bpmpVirtSourcesPatch;
+      defaultText = lib.literalExpression "<generated add-files patch>";
+      description = ''
+        Generated patch that adds the bpmp-virt proxy drivers to a kernel tree.
+
+        Exposed so a guest VM's kernel can be given the same drivers: the host
+        needs the host proxy, the guest needs the guest proxy, and both live in
+        the same source directory.
+      '';
+    };
+
     bpmpAllowAllDomains = lib.mkOption {
       type = lib.types.bool;
-      default = true;
+      default = false;
       description = ''
         Let the BPMP host proxy service every clock, reset and power domain a
         guest asks for, instead of consulting the `allowed-clocks` /
         `allowed-resets` properties on the `bpmp_host_proxy` device-tree node.
 
-        Bring-up crutch. Turn this off once the allow-list in
-        bpmp_host_overlay.dts covers everything the guest actually requests --
-        which you discover by leaving it on once and watching the proxy's log.
+        DANGEROUS. A guest kernel's clk_disable_unused() / genpd_power_off_unused()
+        run BPMP requests to turn off every clock and power domain the guest does
+        not claim. With no allow-list those reach the real BPMP and can switch off
+        hardware the HOST is using -- e.g. its eMMC controller, which wedges the
+        host. The guest must ALSO boot with `clk_ignore_unused pd_ignore_unused`;
+        the passthrough modules add those. Default off. Only ever set true briefly,
+        on a guest carrying those kernel params, to discover what the guest
+        actually requests so the allow-list can be written.
       '';
     };
   };
@@ -108,7 +128,7 @@ in
       }
       {
         name = "bpmp-virt proxy drivers";
-        patch = bpmpVirtSourcesPatch;
+        patch = cfg.sourcesPatch;
       }
       {
         name = "bpmp-virt core hooks";
