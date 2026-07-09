@@ -83,7 +83,7 @@ Two facts fall out of this:
 ```
 net-vm: dwmac-tegra ──MMIO/DMA──▶ vfio-platform ──▶ MGBE0 @ 0x6800000
         │                                            (SMMU SID 6, IOMMU group 8)
-        └─ clk/reset/power ─▶ guest bpmp node (virtual-pa = 0x090c0000)
+        └─ clk/reset/power ─▶ guest bpmp node (virtual-pa = 0x090d0000)
                                  │ MMIO
                               QEMU nvidia_bpmp_guest device
                                  │ write(2)
@@ -154,6 +154,11 @@ lets VFIO bind a device with no VFIO reset driver.
 
 ## Guest changes (net-vm)
 
+The bridge sits at guest physical address **`0x090d0000`**, not the `0x090c0000` used by
+PR #1240. From QEMU 10 onward that slot is `[VIRT_ACPI_PCIHP]`, which `ARM_VIRT` selects, so
+the original address overlaps a live MMIO region. The guest `bpmp` node's `virtual-pa` must
+match whatever the QEMU patch uses.
+
 - **QEMU package, scoped to net-vm only.** Set `microvm.qemu.package` inside net-vm's
   `hardware.definition.netvm.extraModules`, to `ghaf-qemu` plus
   `0001-nvidia-bpmp-guest-driver-initial-commit.patch`. Deliberately *not* via
@@ -164,7 +169,7 @@ lets VFIO bind a device with no VFIO reset driver.
 - **Hand-written guest DTB** `tegra234-netvm-mgbe.dts`, passed as `-dtb`, built by a `dtc`
   derivation. Modelled on the existing `tegra234-netvm.dts`. Contents beyond the standard
   QEMU `virt` skeleton:
-  - `bpmp { compatible = "nvidia,tegra234-bpmp", "nvidia,tegra186-bpmp"; virtual-pa = <0x0 0x090c0000>; }`
+  - `bpmp { compatible = "nvidia,tegra234-bpmp", "nvidia,tegra186-bpmp"; virtual-pa = <0x0 0x090d0000>; }`
   - `platform-bus@c000000` containing `ethernet@…` with:
     - three `reg` windows — `hypervisor`, `mac`, `xpcs`. `macsec-base` is not needed;
       `dwmac-tegra` fetches its windows by name.

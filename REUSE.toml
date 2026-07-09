@@ -66,7 +66,10 @@ SPDX-FileCopyrightText = [
   "Copyright (C) 2013 Red Hat Inc"
 ]
 path = [
-  "packages/pkgs-by-name/ghaf-qemu/patches/*.patch"
+  "packages/pkgs-by-name/ghaf-qemu/patches/*.patch",
+  "packages/pkgs-by-name/ghaf-qemu-bpmp/patches/*.patch",
+  "packages/pkgs-by-name/ghaf-qemu-bpmp/sources/hw/misc/nvidia_bpmp_guest.c",
+  "packages/pkgs-by-name/ghaf-qemu-bpmp/sources/include/hw/misc/nvidia_bpmp_guest.h"
 ]
 
 [[annotations]]
