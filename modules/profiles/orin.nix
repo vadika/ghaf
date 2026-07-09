@@ -157,7 +157,12 @@ in
 
       hardware.nvidia = {
         virtualization.enable = true;
-        virtualization.host.bpmp.enable = false;
+        # Required by MGBE0 passthrough to net-vm: every clock, reset and the
+        # power domain on ethernet@6800000 is a <&bpmp ...> reference, so the
+        # guest driver can only bring the MAC up through the BPMP host proxy.
+        virtualization.host.bpmp.enable = true;
+        # uarta passthrough relied on 0002-bpmp-host-uarta-dts.patch, which was
+        # removed along with the other stale bpmp-virt-host kernel patches.
         passthroughs.host.uarta.enable = false;
         # TODO: uarti passthrough is currently broken, it will be enabled
         # later after a further analysis.
