@@ -39,34 +39,44 @@ line. Upstream `dwmac-tegra` does not know the property exists. There is therefo
 GPIO anywhere in the passthrough path, and no `gpio-guest-proxy` is needed — which
 removes a kernel-driver-pair plus QEMU-device subproject from scope.
 
-**Upstream `dwmac-tegra` probes but cannot reach the PHY.** Rebinding
-`6800000.ethernet` from `nvethernet` to `tegra-mgbe` on the running host:
+**Upstream `dwmac-tegra` works at cold boot; `nvethernet`'s `.remove` poisons it.**
+*Resolved 2026-07-09.*
+
+Rebinding `6800000.ethernet` from `nvethernet` to `tegra-mgbe` on a running host fails —
+the MAC identifies itself, `eth0` registers, but no PHY device is ever instantiated
+(`/sys/bus/mdio_bus/devices/` stays empty):
 
 ```
-tegra-mgbe 6800000.ethernet: User ID: 0x76, Synopsys ID: 0x31
-tegra-mgbe 6800000.ethernet: 	XGMAC2
-...
 mdio_bus stmmac-1: MDIO device at address 0 is missing.
 tegra-mgbe 6800000.ethernet eth0: __stmmac_open: Cannot attach to PHY (error: -19)
 ```
 
-Clocks, resets and all three named `reg` windows resolve from NVIDIA's DT node; the MAC
-identifies itself correctly; `eth0` registers. Only MDIO fails. Ruled out: the PHY reset
-GPIO (never requested), and `nvethernet` still holding the device (`rmmod`'d, same
-result). Reproducible.
+Booting with `modprobe.blacklist=nvethernet` so `tegra-mgbe` claims the device first:
 
-**Root cause is unknown.** The obvious suspect — v6.6's short `mgbe_clks[]` list, which
-omits `rx-input`, `rx-input-m`, `rx-pcs-m`, `rx-pcs-input` and `eee-pcs` and names `"mac"`
-twice — is **disproven**: that array is byte-identical in v6.6, v6.12 and v6.18, and
-mainline drives this exact board with it. Mainline enables MGBE0 on `p3737-0000+p3701` with
-the same c45 PHY at address 0, the same `phy-mode = "10gbase-r"`, and no `snps,clk-csr`, so
-NVIDIA's DT node is functionally equivalent for this driver.
+```
+tegra-mgbe 6800000.ethernet eth0: configuring for phy/10gbase-r link mode
+tegra-mgbe 6800000.ethernet eth0: Link is Up - 1Gbps/Full - flow control off
+PASS: driver=tegra-mgbe phy=Aquantia AQR113C
+```
 
-Remaining hypotheses, in the order the implementation plan tests them: state left behind by
-`nvethernet`'s `.remove` (a hot rebind is not a cold boot); the MDIO clock divider
-(`plat->stmmac_clk` is NULL on this node — `Cannot get CSR clock` — so `clk_csr` defaults to
-0); and jetpack 6.6's `dwmac-tegra` predating upstream fixes. Resolving this is Task 1, and
-it gates the guest driver choice.
+So the driver is sound on this silicon and this DT node. `nvethernet`'s unbind leaves the
+MAC or PHY in a state `dwmac-tegra` cannot recover from. That is irrelevant to the design:
+the host DT overlay gives MGBE0 `compatible = "nvidia,dummy"`, so `nvethernet` never binds
+it in the first place.
+
+`dwmac-tegra`'s **own** unbind/rebind cycle is clean — verified by unbinding and rebinding
+it on the cold-booted host, which re-attaches the PHY and brings the link back up. net-vm
+can therefore be restarted without wedging the NIC.
+
+Two facts fall out of this:
+
+- The PHY is an **Aquantia AQR113C**. The guest needs `CONFIG_AQUANTIA_PHY`, not a Marvell
+  driver.
+- Disproven along the way: v6.6's short `mgbe_clks[]` list (omits `rx-input`, `rx-input-m`,
+  `rx-pcs-m`, `rx-pcs-input`, `eee-pcs`; names `"mac"` twice) is byte-identical in v6.6,
+  v6.12 and v6.18, and mainline drives this exact board with it. No kernel patch is needed.
+  `Cannot get CSR clock` and `Invalid PTP clock rate` are benign — they appear on the
+  working cold-booted system too.
 
 ## Architecture
 
@@ -115,8 +125,8 @@ Reuse from PR #1240, in `modules/reference/hardware/jetpack/nvidia-jetson-orin/v
 
 New:
 
-- Whatever kernel-side fix Task 1's investigation turns out to require, if any. No patch is
-  specified here, because the root cause is not yet known.
+- No kernel-side fix for `dwmac-tegra` is required — see the driver finding above. The host
+  overlay's `compatible = "nvidia,dummy"` is what keeps `nvethernet` away from the device.
 - `mgbe0_pt_host_overlay.dts`: on `/bus@0/ethernet@6800000`, set
   `compatible = "nvidia,dummy"`. Nothing else. `reg`, `interrupts`, `iommus` and
   `dma-coherent` stay as they are. Neither `nvethernet` nor `tegra-mgbe` binds, and
@@ -178,7 +188,9 @@ lets VFIO bind a device with no VFIO reset driver.
   `VIRTIO_MMIO` are already enabled by `bpmp-virt-common`. No nvidia-oot module tree in
   net-vm.
 - The existing WLAN passthrough (`-device vfio-pci,host=0001:01:00.0`) is untouched and
-  continues to work; different bus, no interaction.
+  continues to work; different bus, no interaction. Note that in practice net-vm's uplink
+  today is a **USB ethernet dongle** (`enp0s11u2`); the passed-through WLAN (`wlp0s4f0`) is
+  down. So the wired MAC is an addition to, not a replacement for, net-vm's current WAN.
 
 ## Bring-up sequence
 
@@ -225,6 +237,15 @@ Each step is independently falsifiable. Do not proceed past a failing step.
   leaves `/dev/ttyACM0` as the only way in.
 - **No `interconnects` in the guest** means no EMC bandwidth request. Irrelevant at 1 Gbps.
   Possibly not at 10 Gbps; revisit if the link is ever negotiated above 1 G.
-- **Host loses its only NIC.** Already effectively true — `eth0` is down, unbridged, and the
-  host's default route goes via net-vm at `192.168.100.1`. Recovery is over serial
-  (`/dev/ttyACM0`, `ghaf-host login:`).
+- **Host loses a working NIC.** With a cable plugged in, `ghaf-host` brings `eth0` up and
+  takes a DHCP lease on it (observed: `192.168.68.108`), giving the host direct LAN access
+  and a second route alongside net-vm at `192.168.100.1`. Passthrough removes that. Recovery
+  is over serial (`/dev/ttyACM0`, `ghaf-host login:`) or via the ProxyJump through net-vm.
+- **`nixos-rebuild switch` cannot change the kernel on this target.**
+  `modules/profiles/orin.nix` `mkForce`s `system.build.installBootLoader` to a stub that
+  runs `bootctl install/update` and `exit 0` — it never writes a
+  `/boot/loader/entries/nixos-generation-N.conf`. The device has exactly one entry and one
+  generation, and `loader.conf` has `timeout 0`. Any task that changes the kernel (all the
+  BPMP work) must therefore either write a loader entry by hand, fix the stub, or reflash.
+  A one-shot entry plus `bootctl set-oneshot` is the safe way to test a kernel change: the
+  default generation stays default, so a failed boot recovers on the next power cycle.
