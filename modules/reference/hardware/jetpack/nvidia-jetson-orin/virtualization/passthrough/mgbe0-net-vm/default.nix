@@ -50,6 +50,39 @@ in
       SUBSYSTEM=="vfio", GROUP="kvm"
     '';
 
+    # Keep the host from binding MGBE0, WITHOUT changing its DT compatible.
+    #
+    # The obvious move -- an overlay setting compatible = "nvidia,dummy" (as the
+    # UART/GPU passthroughs do) -- breaks this design: QEMU's vfio-platform reads
+    # the compat from the host device's of_node/compatible to pick an FDT
+    # emitter, so a dummied node makes the nvidia,tegra234-mgbe binding miss and
+    # QEMU exits with "can not be dynamically instantiated".
+    #
+    # So instead leave the DT node alone and blacklist the two drivers that would
+    # bind it. The host has no use for MGBE0 (it is passed through; eqos and
+    # mgbe1..3 are disabled). Keeping the device untouched also avoids the
+    # nvethernet .remove that poisons a later rebind (see Task 1). bindMgbe0 then
+    # attaches vfio-platform to a pristine device whose of_node still reads
+    # "nvidia,tegra234-mgbe".
+    boot.blacklistedKernelModules = [
+      "nvethernet"
+      "dwmac-tegra"
+    ];
+
+    # Bind MGBE0 to vfio-platform before net-vm starts.
+    systemd.services.bindMgbe0 = {
+      description = "Bind MGBE0 (6800000.ethernet) to the vfio-platform driver";
+      wantedBy = [ "multi-user.target" ];
+      before = [ "microvm@net-vm.service" ];
+      serviceConfig = {
+        Type = "oneshot";
+        RemainAfterExit = "yes";
+        ExecStartPre = "${pkgs.bash}/bin/bash -c \"echo vfio-platform > /sys/bus/platform/devices/6800000.ethernet/driver_override\"";
+        ExecStart = "${pkgs.bash}/bin/bash -c \"echo 6800000.ethernet > /sys/bus/platform/drivers/vfio-platform/bind\"";
+      };
+    };
+    systemd.services."microvm@net-vm".after = [ "bindMgbe0.service" ];
+
     ghaf.hardware.definition.netvm.extraModules = [
       (
         { config, pkgs, ... }:
@@ -80,6 +113,13 @@ in
 
           boot.kernelPatches = [
             {
+              # 6.12.95 backported commit 426046e2d, so dwmac-tegra reads MGBE0's
+              # SMMU stream id from DT and -EINVALs when a passthrough guest has
+              # no IOMMU. Fall back to the fixed stream id 6.
+              name = "dwmac-tegra fixed stream id";
+              patch = ./0001-dwmac-tegra-fixed-stream-id.patch;
+            }
+            {
               name = "bpmp-virt proxy drivers";
               patch = virt.sourcesPatch;
             }
@@ -105,13 +145,31 @@ in
                 TEGRA_BPMP = yes;
                 TEGRA_BPMP_GUEST_PROXY = yes;
                 TEGRA_BPMP_HOST_PROXY = no;
+                # BPMP clock/reset/power-domain providers the MGBE0 node refers to.
+                CLK_TEGRA_BPMP = yes;
+                RESET_TEGRA_BPMP = yes;
+                PM_GENERIC_DOMAINS = yes;
+                # The ethernet driver and the AGX devkit's PHY (Aquantia AQR113C,
+                # identified on the host in Task 1).
+                STMMAC_ETH = yes;
+                STMMAC_PLATFORM = yes;
+                DWMAC_TEGRA = yes;
+                AQUANTIA_PHY = yes;
               };
             }
           ];
 
           # Only this VM gets the QEMU that has the BPMP bridge and, crucially,
-          # still has -device vfio-platform (removed upstream in 10.2).
+          # still has -device vfio-platform (removed upstream in 10.2). That QEMU
+          # also carries the FDT binding that emits MGBE0's guest node.
           ghaf.virtualization.qemu.package = lib.mkForce pkgs.ghaf-qemu-bpmp;
+
+          # Hand MGBE0 to the guest. QEMU emits the ethernet DT node itself (from
+          # the nvidia,tegra234-mgbe binding in sysbus-fdt.c); there is no -dtb.
+          microvm.qemu.extraArgs = [
+            "-device"
+            "vfio-platform,host=6800000.ethernet"
+          ];
         }
       )
     ];

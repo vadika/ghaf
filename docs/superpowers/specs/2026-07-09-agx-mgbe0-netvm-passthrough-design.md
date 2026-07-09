@@ -161,7 +161,12 @@ New:
 
 - No kernel-side fix for `dwmac-tegra` is required — see the driver finding above. The host
   overlay's `compatible = "nvidia,dummy"` is what keeps `nvethernet` away from the device.
-- `mgbe0_pt_host_overlay.dts`: on `/bus@0/ethernet@6800000`, set
+- Do NOT dummy MGBE0's DT `compatible`. QEMU's vfio-platform reads the compat from the
+  host device's `of_node/compatible` to choose an FDT emitter; a `nvidia,dummy` node
+  makes the `nvidia,tegra234-mgbe` binding miss and QEMU exits. Instead blacklist
+  `nvethernet` and `dwmac-tegra` on the host so nothing binds MGBE0, leaving its
+  compatible intact and the device pristine for the guest. (superseded note follows)
+- ~~`mgbe0_pt_host_overlay.dts`: on `/bus@0/ethernet@6800000`, set
   `compatible = "nvidia,dummy"`. Nothing else. `reg`, `interrupts`, `iommus` and
   `dma-coherent` stay as they are. Neither `nvethernet` nor `tegra-mgbe` binds, and
   `vfio-platform` takes the device by `driver_override`. The IOMMU group is formed from
