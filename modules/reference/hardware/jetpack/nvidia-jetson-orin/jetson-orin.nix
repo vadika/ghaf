@@ -367,7 +367,14 @@ in
     ghaf.global-config.givc.enable = true;
     ghaf.global-config.logging.enable = true;
     ghaf.hardware = {
-      aarch64.systemd-boot-dtb.enable = true;
+      # DEV ONLY (do not merge): nixpkgs' systemd-boot already emits a
+      # `devicetree` line from hardware.deviceTree. systemd-boot-dtb appends a
+      # second one with `echo >> entries/$default_cfg`, where $default_cfg is the
+      # literal glob `nixos-*` and the entry file has no trailing newline — so it
+      # welds `devicetree ...` onto `sort-key nixos`. That corrupt entry is why
+      # orin.nix mkForce'd system.build.installBootLoader to a stub, which in turn
+      # means nixos-rebuild never writes a boot entry at all.
+      aarch64.systemd-boot-dtb.enable = false;
       passthrough = {
         vhotplug.enable = true;
         usbQuirks.enable = true;
@@ -376,7 +383,18 @@ in
 
     boot = {
       loader = {
-        efi.canTouchEfiVariables = true;
+        # DEV ONLY (do not merge): must stay false on Jetson.
+        #
+        # With this true, nixpkgs' systemd-boot builder runs `bootctl install`
+        # without `--no-variables`, which writes a UEFI Boot#### variable
+        # ("Linux Boot Manager") and reorders BootOrder. Those live in QSPI, so a
+        # power cycle does not undo them, and on this board the result is a device
+        # that never hands off to Linux. Recovering needs a firmware reflash.
+        #
+        # With it false, bootctl still installs the loader binaries onto the ESP;
+        # it just leaves the firmware's boot variables alone. verity-image.nix
+        # already mkForces this to false for the same reason.
+        efi.canTouchEfiVariables = false;
         systemd-boot.enable = true;
       };
 
