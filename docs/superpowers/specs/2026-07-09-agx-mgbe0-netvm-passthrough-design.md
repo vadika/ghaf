@@ -55,19 +55,18 @@ identifies itself correctly; `eth0` registers. Only MDIO fails. Ruled out: the P
 GPIO (never requested), and `nvethernet` still holding the device (`rmmod`'d, same
 result). Reproducible.
 
-Prime suspect, **not yet root-caused** — the v6.6 clock list is short and contains a
-duplicate:
+**Root cause is unknown.** The obvious suspect — v6.6's short `mgbe_clks[]` list, which
+omits `rx-input`, `rx-input-m`, `rx-pcs-m`, `rx-pcs-input` and `eee-pcs` and names `"mac"`
+twice — is **disproven**: that array is byte-identical in v6.6, v6.12 and v6.18, and
+mainline drives this exact board with it. Mainline enables MGBE0 on `p3737-0000+p3701` with
+the same c45 PHY at address 0, the same `phy-mode = "10gbase-r"`, and no `snps,clk-csr`, so
+NVIDIA's DT node is functionally equivalent for this driver.
 
-```c
-static const char *const mgbe_clks[] = {
-	"rx-pcs", "tx", "tx-pcs", "mac-divider", "mac", "mgbe", "ptp-ref", "mac"
-};
-```
-
-`rx-input`, `rx-input-m`, `rx-pcs-m`, `rx-pcs-input` and `eee-pcs` are absent, and
-`"mac"` appears twice. `nvethernet` enables all 13. Later mainline corrects the list.
-Proving or disproving this is step 1 of implementation, and it gates the guest driver
-choice.
+Remaining hypotheses, in the order the implementation plan tests them: state left behind by
+`nvethernet`'s `.remove` (a hot rebind is not a cold boot); the MDIO clock divider
+(`plat->stmmac_clk` is NULL on this node — `Cannot get CSR clock` — so `clk_csr` defaults to
+0); and jetpack 6.6's `dwmac-tegra` predating upstream fixes. Resolving this is Task 1, and
+it gates the guest driver choice.
 
 ## Architecture
 
@@ -116,10 +115,9 @@ Reuse from PR #1240, in `modules/reference/hardware/jetpack/nvidia-jetson-orin/v
 
 New:
 
-- Kernel patch fixing `mgbe_clks[]` in `drivers/net/ethernet/stmicro/stmmac/dwmac-tegra.c`:
-  add `rx-input`, `rx-input-m`, `rx-pcs-m`, `rx-pcs-input`, `eee-pcs`; drop the duplicate
-  `"mac"`.
-- `mgbe0_passthrough_overlay.dts`: on `/bus@0/ethernet@6800000`, set
+- Whatever kernel-side fix Task 1's investigation turns out to require, if any. No patch is
+  specified here, because the root cause is not yet known.
+- `mgbe0_pt_host_overlay.dts`: on `/bus@0/ethernet@6800000`, set
   `compatible = "nvidia,dummy"`. Nothing else. `reg`, `interrupts`, `iommus` and
   `dma-coherent` stay as they are. Neither `nvethernet` nor `tegra-mgbe` binds, and
   `vfio-platform` takes the device by `driver_override`. The IOMMU group is formed from
@@ -170,9 +168,15 @@ lets VFIO bind a device with no VFIO reset driver.
   - `ranges` on the platform bus translate the real hardware addresses the DT node names
     to whatever GPA QEMU assigned each VFIO region, as `tegra234-gpuvm.dts` does. PR #1240's
     `0003-Print-irqs.patch` reports the SPIs QEMU allocated.
-- **Guest kernel**: `TEGRA_BPMP_GUEST_PROXY=y`, `DWMAC_TEGRA=y`, plus the Tegra BPMP clock,
-  reset and power-domain providers. `VFIO`, `VIRTIO_MMIO` are already enabled by
-  `bpmp-virt-common`. No nvidia-oot module tree in net-vm.
+- **Guest kernel pinned to `linuxPackages_6_12`.** net-vm otherwise takes nixpkgs' default
+  (6.18). From v6.13 (commit `426046e2d`) `tegra_mgbe_probe()` reads the SMMU stream ID via
+  `tegra_dev_iommu_get_stream_id()`, which requires an `iommu_fwspec`; a QEMU `virt` guest
+  has no IOMMU, so probe would return `-EINVAL`. v6.12 hardcodes `MGBE_SID 0x6` — exactly
+  MGBE0's stream ID — and already carries the Oct-2024 serdes bring-up fix (`1cff6ff30`)
+  that v6.6 lacks. Config: `TEGRA_BPMP_GUEST_PROXY=y`, `DWMAC_TEGRA=y`, `STMMAC_ETH=y`,
+  a c45 PHY driver, plus the Tegra BPMP clock, reset and power-domain providers. `VFIO` and
+  `VIRTIO_MMIO` are already enabled by `bpmp-virt-common`. No nvidia-oot module tree in
+  net-vm.
 - The existing WLAN passthrough (`-device vfio-pci,host=0001:01:00.0`) is untouched and
   continues to work; different bus, no interaction.
 
@@ -211,7 +215,14 @@ Each step is independently falsifiable. Do not proceed past a failing step.
   (PLLs) that are not named on the MGBE0 node. The `allows-all-domains` patch masks this
   during bring-up and will hide the problem until it is removed.
 - **`dwmac-tegra` hardcodes SID 6.** Any future overlay that retargets `iommus` on this node
-  breaks DMA silently — faults, not a probe error.
+  breaks DMA silently — faults, not a probe error. And any bump of net-vm's guest kernel past
+  v6.12 turns that hardcode into a DT read the guest cannot satisfy, breaking probe outright.
+- **No aarch64 builder.** Every image goes through the cross target
+  `nvidia-jetson-orin-agx-debug-from-x86_64`. Kernel and QEMU changes mean full rebuilds;
+  iterations are slow.
+- **Serial is the only recovery path.** `ghaf-host` has no NIC of its own and no known
+  inbound SSH route; it reaches the network through net-vm. A net-vm that will not boot
+  leaves `/dev/ttyACM0` as the only way in.
 - **No `interconnects` in the guest** means no EMC bandwidth request. Irrelevant at 1 Gbps.
   Possibly not at 10 Gbps; revisit if the link is ever negotiated above 1 G.
 - **Host loses its only NIC.** Already effectively true — `eth0` is down, unbridged, and the
