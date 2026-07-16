@@ -174,6 +174,13 @@ in
     # GPU/host1x to vfio. Turn the host desktop off when gpu_vm is enabled.
     ghaf.profiles.graphics.enable = lib.mkForce false;
 
+    # The stock nvpmodel profiles require sysfs interfaces provided by the host
+    # GPU driver. Those interfaces do not exist while vfio-platform owns the
+    # GPU, causing nvpmodel.service to fail and restart indefinitely. Power
+    # policy should eventually be split so the host controls CPU/EMC limits and
+    # gpu-vm controls GPU limits.
+    services.nvpmodel.enable = lib.mkForce false;
+
     # Release the GPU + host1x compute stack from the host so vfio-platform binds
     # pristine devices (as MGBE0 does). host1x is blacklisted too because the GPU
     # and the multimedia engines (vic/nvdec/nvjpg) are its clients -- without the
