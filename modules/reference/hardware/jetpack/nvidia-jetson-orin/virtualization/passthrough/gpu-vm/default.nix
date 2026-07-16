@@ -181,6 +181,11 @@ in
     # gpu-vm controls GPU limits.
     services.nvpmodel.enable = lib.mkForce false;
 
+    # NVIDIA Docker cannot use the GPU while vfio-platform assigns it to
+    # gpu-vm. Containerized GPU workloads should eventually run inside gpu-vm
+    # instead of keeping the host NVIDIA container stack enabled.
+    ghaf.virtualization.nvidia-docker.daemon.enable = lib.mkForce false;
+
     # Release the GPU + host1x compute stack from the host so vfio-platform binds
     # pristine devices (as MGBE0 does). host1x is blacklisted too because the GPU
     # and the multimedia engines (vic/nvdec/nvjpg) are its clients -- without the
