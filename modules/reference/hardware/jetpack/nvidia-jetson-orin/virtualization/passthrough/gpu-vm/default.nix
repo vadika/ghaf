@@ -513,15 +513,27 @@ in
                       # the SOR is never assigned (dark until manual replug).
                       # Schedule the same deferred hotplug work once at init.
                       ./patches/0020-synthesize-boot-hotplug-long-pulse.patch
-                      # Flip pacing: the host DCE R5 consumes each flip kickoff
-                      # in ~250us (GET catches PUT immediately, measured) but
-                      # posts the flip-completion event ~130ms later, capping
-                      # flips at ~8-10fps. The immediate WRITE_AWAKEN path is
-                      # rejected by the R5 (0009). So deliver the flip-occurred
-                      # ourselves one 60Hz frame after kickoff; a put-offset
-                      # guard suppresses the R5's late duplicate. Restores
-                      # ~60fps.
-                      ./patches/0010-dce-synthetic-flip-completion.patch
+                      # Drop the host DCE R5's flip-completion event: it
+                      # arrives ~130ms after kickoff (caps flips at ~8-10fps).
+                      # The flip is instead completed from the hardware-written
+                      # KAPI completion notifier, polled by nvidia-drm (0013).
+                      ./patches/0010-dce-drop-r5-completion-event.patch
+                      # Window-channel completion notifier: plain WRITE, never
+                      # WRITE_AWAKEN -- same R5 abort as the core channel
+                      # (0009). Required so the KAPI completion-notifier memory
+                      # actually lands in DRAM and can be polled for real flip
+                      # completion (0013, the notifier-poll rework).
+                      ./patches/0011-window-notifier-plain-write.patch
+                      # DRM-side flip completion via vblank qualification: the
+                      # completion notifier is not a usable per-flip signal in
+                      # passthrough (the current flip's notifier reaches BEGUN
+                      # but never FINISHED in the guest window). Instead complete
+                      # each committed flip on the first vblank after submission
+                      # -- the scanout latch point (coherent with scanout, so no
+                      # tearing) -- delivered lock-free from the vblank callback
+                      # with a kickoff-sequence generation guard. Replaces the
+                      # fixed-delay synthetic timer that tore.
+                      ./patches/0013-drm-vblank-flip-completion.patch
                     ]
                     # dce-dbg bring-up instrumentation (ctxdma/pushbuffer/instmem
                     # FE-arming params, DISPRM RPC + payload hexdumps, core PB

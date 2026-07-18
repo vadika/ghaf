@@ -11,10 +11,27 @@ Inert on real hardware (never called).
 diff --git a/drivers/platform/tegra/dce/dce-client-ipc.c b/drivers/platform/tegra/dce/dce-client-ipc.c
 --- a/drivers/platform/tegra/dce/dce-client-ipc.c	2026-07-15 17:02:41.583943334 +0300
 +++ b/drivers/platform/tegra/dce/dce-client-ipc.c	2026-07-15 17:02:57.410592701 +0300
-@@ -211,6 +211,33 @@
+@@ -211,6 +211,53 @@
  }
  EXPORT_SYMBOL(tegra_dce_unregister_ipc_client);
  
++/*
++ * dce passthrough: monotonic count of reverse-doorbell events injected into
++ * RM/NVKMS. Bumped in tegra_dce_client_ipc_inject() BEFORE the event enters
++ * the RM client callback, so a DRM consumer can distinguish a vblank callback
++ * triggered by a post-kickoff event from one triggered by a stale pre-kickoff
++ * event blocked behind the commit lock (nvidia-drm vblank-qualified flip
++ * completion). Inert on real hardware (the injector is never called there).
++ */
++atomic_t tegra_dce_ingress_seq = ATOMIC_INIT(0);
++EXPORT_SYMBOL(tegra_dce_ingress_seq);
++
++u32 tegra_dce_get_ingress_seq(void)
++{
++	return (u32)atomic_read(&tegra_dce_ingress_seq);
++}
++EXPORT_SYMBOL(tegra_dce_get_ingress_seq);
++
 +/*
 + * Virtual DCE (guest proxy) hook: deliver an externally-sourced async event
 + * to the registered client of the given type, exactly as
@@ -28,6 +45,9 @@ diff --git a/drivers/platform/tegra/dce/dce-client-ipc.c b/drivers/platform/tegr
 +{
 +	struct tegra_dce_client_ipc *cl;
 +	u32 i;
++
++	/* Stamp this event's ingress before it enters the RM client callback. */
++	atomic_inc(&tegra_dce_ingress_seq);
 +
 +	for (i = 0; i < DCE_CLIENT_IPC_TYPE_MAX; i++) {
 +		cl = &client_handles[i];
@@ -48,15 +68,18 @@ diff --git a/drivers/platform/tegra/dce/dce-client-ipc.c b/drivers/platform/tegr
 diff --git a/include/linux/platform/tegra/dce/dce-client-ipc.h b/include/linux/platform/tegra/dce/dce-client-ipc.h
 --- a/include/linux/platform/tegra/dce/dce-client-ipc.h	2026-07-15 17:02:41.584582971 +0300
 +++ b/include/linux/platform/tegra/dce/dce-client-ipc.h	2026-07-15 17:03:00.327580640 +0300
-@@ -67,6 +67,13 @@
+@@ -67,6 +67,16 @@
  int tegra_dce_unregister_ipc_client(u32 handle);
- 
+
  /*
 + * Virtual DCE (guest proxy) hook: inject an async event to the registered
 + * client of @type as if it had arrived on the IVC channel. Inert on real
 + * hardware. Returns -ENOENT when no client of that type is registered.
 + */
 +int tegra_dce_client_ipc_inject(u32 type, u32 msg_length, void *msg_data);
++
++/* dce passthrough: monotonic ingress sequence of injected doorbell events. */
++u32 tegra_dce_get_ingress_seq(void);
 +
 +/*
   * tegra_dce_client_ipc_send_recv() - used by clients to send rpcs to dce
