@@ -27,7 +27,10 @@ let
   # Flip to true to re-enable the dce-dbg bring-up instrumentation
   # (patches/debug/), which logs every DCE-facing address, RPC and payload.
   # Extremely chatty -- pair with the guest's log_buf_len bump.
-  gpuvmDceDebug = false;
+  # NOTE: temporarily forced to true (original default: false) to build the
+  # flip-awaken-contract instrumentation (patches/debug/0008-...). Restore to
+  # false once that diagnostic run is done.
+  gpuvmDceDebug = true;
   # Host-side virtualization config (sourcesPatch is defined here, not on the
   # guest). Captured from the host scope so the guest extraModules below can
   # reference it without the inner `config` shadow picking up the guest config.
@@ -537,6 +540,14 @@ in
                       ./patches/debug/0004-dce-debug-event-interest.patch
                       ./patches/debug/0005-dce-debug-flip-delivered.patch
                       ./patches/debug/0006-dce-debug-flip-rm-callback.patch
+                      # Flip-completion awaken contract: logs the three
+                      # points where a kickoff's WRITE vs WRITE_AWAKEN
+                      # notifier mode is decided/consumed (nvidia-drm's
+                      # pending_events_plane_mask, KAPI's awaken flag, and
+                      # what EvoFlipC3Common actually programs after 0011's
+                      # ISO-surface gate) -- to catch a pending flip that
+                      # never gets its R5 awaken.
+                      ./patches/debug/0008-dce-debug-flip-awaken-contract.patch
                     ];
                   # DCE display proxy (guest side): redirect the guest's DCE IPC
                   # through the shared MMIO window and skip the R5 bootstrap (the

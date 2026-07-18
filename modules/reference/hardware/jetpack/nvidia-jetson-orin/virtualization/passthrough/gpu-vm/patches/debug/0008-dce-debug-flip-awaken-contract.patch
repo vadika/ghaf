@@ -1,0 +1,53 @@
+DIAGNOSTIC ONLY (gpuvmDceDebug): log the flip-completion awaken contract at
+the three points where it is decided/consumed, to confirm the hypothesis that
+a pending DRM page-flip's awaken never arrives because a downstream gate
+requires the ISO surface to be non-NULL:
+
+  1. nvidia-drm-modeset.c: whether nvidia-drm expects a flip-done event for
+     this plane at all (pending_events_plane_mask).
+  2. nvkms-kapi.c: whether KAPI actually requested WRITE_AWAKEN for this
+     kickoff (only set when the primary layer's surface is non-NULL).
+  3. nvkms-evo3.c: what EvoFlipC3Common actually programmed into hardware
+     (WRITE vs WRITE_AWAKEN), after 0011's ISO-surface gate.
+
+--- a/nvdisplay/kernel-open/nvidia-drm/nvidia-drm-modeset.c
++++ b/nvdisplay/kernel-open/nvidia-drm/nvidia-drm-modeset.c
+@@ -128,6 +128,7 @@
+         if (old_crtc_state->active && old_plane_state->fb != NULL) {
+             *pending_events_plane_mask |= NVBIT(plane->index);
+         }
++        printk(KERN_INFO "[gpuvm-dbg] nvdrm-kickoff: plane=%u old_active=%d old_fb=%d pending_mask=0x%x plane_mask=0x%x\n", plane->index, old_crtc_state->active, old_plane_state->fb != NULL, *pending_events_plane_mask, *plane_mask);
+     }
+ }
+ 
+--- a/nvdisplay/src/nvidia-modeset/kapi/src/nvkms-kapi.c
++++ b/nvdisplay/src/nvidia-modeset/kapi/src/nvkms-kapi.c
+@@ -2842,6 +2842,13 @@
+             currFlipNotifierIndex = nextIndex;
+     }
+ 
++    nvEvoLog(EVO_LOG_ERROR,
++             "[gpuvm-dbg] kapi-primary: head=%u commit=%d changed=%d surface=%d awaken=%d notifIdx=%u",
++             head, commit, changed,
++             layerConfig->surface != NULL,
++             params->layer[NVKMS_MAIN_LAYER].completionNotifier.val.awaken,
++             device->layerState[head][NVKMS_MAIN_LAYER].currFlipNotifierIndex);
++
+     return NV_TRUE;
+ }
+ 
+--- a/nvdisplay/src/nvidia-modeset/src/nvkms-evo3.c
++++ b/nvdisplay/src/nvidia-modeset/src/nvkms-evo3.c
+@@ -4340,6 +4340,12 @@
+ 
+         SetWinNotifierSurfaceAddressAndControl(pChannel,
+             pSurfaceDesc, offset, ctrlVal);
++        nvEvoLog(EVO_LOG_ERROR,
++                 "[gpuvm-dbg] evo3-flip: head=%u req_awaken=%d iso_surf=%d emitted=%s",
++                 head, pHwState->completionNotifier.awaken,
++                 pHwState->pSurfaceEvo[NVKMS_LEFT] != NULL,
++                 (pHwState->completionNotifier.awaken &&
++                  pHwState->pSurfaceEvo[NVKMS_LEFT] != NULL) ? "AWAKEN" : "WRITE");
+     }
+ 
+     if (!pHwState->pSurfaceEvo[NVKMS_LEFT]) {
