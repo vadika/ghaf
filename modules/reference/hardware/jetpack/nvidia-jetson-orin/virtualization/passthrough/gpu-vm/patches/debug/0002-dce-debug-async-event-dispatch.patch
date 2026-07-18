@@ -1,0 +1,54 @@
+dce-dbg: log every incoming DCE async event (function code + routing keys)
+
+The reverse-doorbell relay delivers RM_EVENT frames to
+dceclientHandleAsyncRpcCallback. To fix flip-occurred delivery we need to
+know what the 60Hz stream actually is: POST_EVENT (per-hEvent or notify-list)
+vs RG_LINE_INTR vs MODESET, and for POST_EVENT which hClient/hEvent it
+targets and whether the dispatch lookup succeeds.
+
+--- a/nvdisplay/src/nvidia/src/kernel/gpu/dce_client/dce_client_rpc.c
++++ b/nvdisplay/src/nvidia/src/kernel/gpu/dce_client/dce_client_rpc.c
+@@ -314,6 +314,9 @@
+     msg_hdr = (rpc_message_header_v *)data;
+     rpc_msg_data = msg_hdr->rpc_message_data;
+
++    NV_PRINTF(LEVEL_ERROR, "dce-dbg ASYNC-EVT function=0x%x length=%u\n",
++              msg_hdr->function, msgLength);
++
+     switch (msg_hdr->function)
+     {
+         case NV_VGPU_MSG_EVENT_POST_EVENT:
+@@ -322,6 +325,11 @@
+
+             if (rpc_params->bNotifyList)
+             {
++                NV_PRINTF(LEVEL_ERROR,
++                          "dce-dbg ASYNC-EVT POST notifyList idx=%u dataSize=%u\n",
++                          rpc_params->notifyIndex,
++                          rpc_params->eventDataSize);
++
+                 gpuNotifySubDeviceEvent(pGpu, rpc_params->notifyIndex,
+                                         rpc_params->eventData,
+                                         rpc_params->eventDataSize, 0, 0);
+@@ -333,6 +341,11 @@
+                 Event             *pEvent       = NULL;
+                 NV_STATUS          nvStatus     = NV_OK;
+
++                NV_PRINTF(LEVEL_ERROR,
++                          "dce-dbg ASYNC-EVT POST hClient=0x%x hEvent=0x%x status=0x%x\n",
++                          rpc_params->hClient, rpc_params->hEvent,
++                          rpc_params->status);
++
+                 // Get the notification list that contains this event.
+                 NV_CHECK_OR_RETURN_VOID(LEVEL_ERROR, CliGetEventInfo(rpc_params->hClient,
+                                                                      rpc_params->hEvent, &pEvent));
+@@ -347,6 +360,9 @@
+                 {
+                     if (pNotifyEvent->hEvent == rpc_params->hEvent)
+                     {
++                        NV_PRINTF(LEVEL_ERROR,
++                                  "dce-dbg ASYNC-EVT deliver hEvent=0x%x\n",
++                                  rpc_params->hEvent);
+                         nvStatus = osNotifyEvent(pGpu, pNotifyEvent, 0,
+                                    rpc_params->data, rpc_params->status);
+                         if (nvStatus != NV_OK)

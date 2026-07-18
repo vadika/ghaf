@@ -1,0 +1,37 @@
+dce-dbg: trace event-interest declaration and ioctl-open list membership
+
+nvidia-drm declares FLIP_OCCURRED interest (mask 0xe3) once at load, yet at
+flip time the single pOpen in perOpenIoctlList has interestMask 0. Print the
+pOpen at declaration, at list append (AssignNvKmsPerOpenType Ioctl), and at
+list removal (nvKmsClose) to see whether the declaring open is closed or the
+listed open is a different, never-declared one.
+
+--- a/nvdisplay/src/nvidia-modeset/src/nvkms.c
++++ b/nvdisplay/src/nvidia-modeset/src/nvkms.c
+@@ -1265,6 +1265,8 @@
+             return FALSE;
+         }
+
++        nvEvoLog(EVO_LOG_ERROR, "dce-dbg EVTINT list-add pOpen=%p", pOpen);
++
+         nvListAppend(&pOpen->perOpenIoctlListEntry, &perOpenIoctlList);
+         break;
+
+@@ -3070,6 +3072,9 @@
+     struct NvKmsDeclareEventInterestParams *pParams = pParamsVoid;
+
+     nvAssert(pOpen->type == NvKmsPerOpenTypeIoctl);
+
++    nvEvoLog(EVO_LOG_ERROR, "dce-dbg EVTINT declare pOpen=%p mask=0x%x",
++             pOpen, pParams->request.interestMask);
++
+     pOpen->ioctl.eventInterestMask = pParams->request.interestMask;
+
+     return TRUE;
+@@ -4306,6 +4311,7 @@
+             nvFree(pEntry);
+         }
+
++        nvEvoLog(EVO_LOG_ERROR, "dce-dbg EVTINT list-del pOpen=%p", pOpen);
+         nvListDel(&pOpen->perOpenIoctlListEntry);
+     }

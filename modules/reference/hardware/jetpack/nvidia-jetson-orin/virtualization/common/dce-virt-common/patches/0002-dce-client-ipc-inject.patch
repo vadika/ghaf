@@ -1,0 +1,64 @@
+From: Ghaf contributors <ghaf@tii.ae>
+Subject: [PATCH] dce: export tegra_dce_client_ipc_inject for the guest proxy
+
+Reverse-doorbell stage 2: dce-guest-proxy consumes DCE RM_NOTIFY (ch3)
+events relayed from the host and must deliver them to the client
+nvdisplay registered (DCE_CLIENT_IPC_TYPE_RM_EVENT), exactly as
+dce_client_process_event_ipc() does after an IVC read. Export a small
+injector that looks the client up by type and invokes its callback.
+Inert on real hardware (never called).
+---
+diff --git a/drivers/platform/tegra/dce/dce-client-ipc.c b/drivers/platform/tegra/dce/dce-client-ipc.c
+--- a/drivers/platform/tegra/dce/dce-client-ipc.c	2026-07-15 17:02:41.583943334 +0300
++++ b/drivers/platform/tegra/dce/dce-client-ipc.c	2026-07-15 17:02:57.410592701 +0300
+@@ -211,6 +211,33 @@
+ }
+ EXPORT_SYMBOL(tegra_dce_unregister_ipc_client);
+ 
++/*
++ * Virtual DCE (guest proxy) hook: deliver an externally-sourced async event
++ * to the registered client of the given type, exactly as
++ * dce_client_process_event_ipc() would after reading it from the IVC channel.
++ * Used by dce-guest-proxy to inject DCE RM_NOTIFY (ch3) events relayed from
++ * the host over the reverse doorbell window. Inert on real hardware (never
++ * called). Runs in the caller's process context, same as the native
++ * workqueue delivery.
++ */
++int tegra_dce_client_ipc_inject(u32 type, u32 msg_length, void *msg_data)
++{
++	struct tegra_dce_client_ipc *cl;
++	u32 i;
++
++	for (i = 0; i < DCE_CLIENT_IPC_TYPE_MAX; i++) {
++		cl = &client_handles[i];
++		if (cl->valid && cl->type == type && cl->callback_fn != NULL) {
++			cl->callback_fn(cl->handle, cl->type, msg_length,
++					msg_data, cl->data);
++			return 0;
++		}
++	}
++
++	return -ENOENT;
++}
++EXPORT_SYMBOL(tegra_dce_client_ipc_inject);
++
+ int tegra_dce_client_ipc_send_recv(u32 handle, struct dce_ipc_message *msg)
+ {
+ 	int ret;
+diff --git a/include/linux/platform/tegra/dce/dce-client-ipc.h b/include/linux/platform/tegra/dce/dce-client-ipc.h
+--- a/include/linux/platform/tegra/dce/dce-client-ipc.h	2026-07-15 17:02:41.584582971 +0300
++++ b/include/linux/platform/tegra/dce/dce-client-ipc.h	2026-07-15 17:03:00.327580640 +0300
+@@ -67,6 +67,13 @@
+ int tegra_dce_unregister_ipc_client(u32 handle);
+ 
+ /*
++ * Virtual DCE (guest proxy) hook: inject an async event to the registered
++ * client of @type as if it had arrived on the IVC channel. Inert on real
++ * hardware. Returns -ENOENT when no client of that type is registered.
++ */
++int tegra_dce_client_ipc_inject(u32 type, u32 msg_length, void *msg_data);
++
++/*
+  * tegra_dce_client_ipc_send_recv() - used by clients to send rpcs to dce
+  * @client_id : client_id registered with dce driver
+  * @msg : message to be sent and received

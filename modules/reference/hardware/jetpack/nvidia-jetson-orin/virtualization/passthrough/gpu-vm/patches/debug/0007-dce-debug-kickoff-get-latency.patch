@@ -1,0 +1,32 @@
+--- a/nvdisplay/src/nvidia-modeset/src/nvkms-dma.c
++++ b/nvdisplay/src/nvidia-modeset/src/nvkms-dma.c
+@@ -117,6 +117,29 @@
+         void *pControl = push_buffer->control[i];
+         nvDmaStorePioMethod(pControl, NV917D_PUT, putOffset);
+     }
++
++    /* dce-dbg: measure how long the display FE takes to consume this
++     * kickoff (GET catching PUT). Splits R5-executes-late from
++     * R5-reports-late for the ~130ms flip pacing. Debug-only busy wait,
++     * bounded at 200ms. */
++    {
++        NvU64 t0 = nvkms_get_usec();
++        NvU32 get = 0;
++
++        do {
++            get = nvDmaLoadPioMethod(push_buffer->control[0], NV917D_GET);
++            if (get == putOffset) {
++                break;
++            }
++            if ((nvkms_get_usec() - t0) > 200000) {
++                break;
++            }
++            nvkms_yield();
++        } while (1);
++        nvEvoLog(EVO_LOG_ERROR, "dce-dbg KICK put=0x%x get=0x%x us=%llu",
++                 putOffset, get,
++                 (unsigned long long)(nvkms_get_usec() - t0));
++    }
+ }
+ 
+ /* Read GET from an EVO core channel */

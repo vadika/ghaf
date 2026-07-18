@@ -376,7 +376,16 @@ static bool check_if_allowed(struct tegra_bpmp_message *msg)
 		return false;
 	}
 
-	deb_warn("Warning, msg->mrq %d not allowed", msg->mrq);
+	/* DIAGNOSTIC: log EVERY rejected MRQ with its command/payload so a display
+	 * bring-up that needs a display-specific MRQ (e.g. MRQ_UPHY) the proxy does
+	 * not relay is visible. tx.data[0] is the MRQ sub-command for most MRQs. */
+	{
+		const u32 *d = (const u32 *)msg->tx.data;
+		deb_warn("REJECTED mrq=%u tx_size=%zu data0=0x%08x data1=0x%08x",
+			 msg->mrq, msg->tx.size,
+			 (d && msg->tx.size >= 4) ? d[0] : 0u,
+			 (d && msg->tx.size >= 8) ? d[1] : 0u);
+	}
 
 	return false;
 }

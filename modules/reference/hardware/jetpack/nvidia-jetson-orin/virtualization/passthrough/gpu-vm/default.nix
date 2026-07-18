@@ -9,8 +9,12 @@
 # Control: clocks/resets/power-domains route through the BPMP host proxy, gated
 #          by the union allow-list (ids enumerated on hardware).
 #
-# Display is out of scope: this is a compute-only passthrough. The
-# display/dce engines are not passed through and stay with the host.
+# Display (13800000.display) is NOT passed through: the host-owned DCE R5 must
+# keep it (and drives scanout directly). vfio-binding display to the guest
+# resets/reprograms it out from under the R5, which then aborts at dce_ss_set
+# (DCE_HALTED) during its own bootstrap -- confirmed on hardware with the guest
+# even stopped, so it is the vfio binding alone, not guest activity. The guest
+# reaches the panel only through the DCE host-proxy IPC path, never display MMIO.
 {
   lib,
   pkgs,
@@ -19,8 +23,14 @@
 }:
 let
   cfg = config.ghaf.hardware.nvidia.passthroughs.gpu_vm;
-  # Host scope, captured so the guest extraModules below see it past the inner
-  # `config` shadow (sourcesPatch is host-side).
+
+  # Flip to true to re-enable the dce-dbg bring-up instrumentation
+  # (patches/debug/), which logs every DCE-facing address, RPC and payload.
+  # Extremely chatty -- pair with the guest's log_buf_len bump.
+  gpuvmDceDebug = false;
+  # Host-side virtualization config (sourcesPatch is defined here, not on the
+  # guest). Captured from the host scope so the guest extraModules below can
+  # reference it without the inner `config` shadow picking up the guest config.
   virt = config.ghaf.hardware.nvidia.virtualization;
 
   # Reserved-memory carveouts take an explicit mmio-base for 1:1 GPA=HPA;
@@ -38,10 +48,24 @@ let
       dev = "100000000.vm_cma_vram_p";
       base = "0x100000000";
     }
+    # 1:1 scanout carveout: nvdisplay allocates its scanout surface here and
+    # the host-owned DCE R5 DMAs it at the same PA. Mirrors scanout/scanout_p
+    # in gpu_passthrough_overlay.dts and dce_scanout in tegra234-gpuvm.dts.
+    {
+      dev = "b0000000.scanout_p";
+      base = "0xb0000000";
+    }
   ];
-  # Compute engines only. display@13800000/dce@d800000 stay with the host:
-  # compute-only, and pulling display out from under the live host stack panics
-  # the host at boot (OP-TEE display TA fault).
+  # GPU compute engines. Neither dce@d800000 nor display@13800000 is here: the
+  # host keeps the real DCE, bootstraps its R5, and the R5 drives display@13800000
+  # directly. Passing display to the guest via vfio resets it and halts the R5
+  # (DCE_HALTED at dce_ss_set), so display stays host-side and unbound; the guest
+  # reaches the panel only through the DCE host-proxy IPC path.
+  #
+  # host1x@13e00000 is still passed: the guest GPU stack (nvgpu) needs host1x
+  # syncpoints. If the R5 still halts with display host-side, host1x is the next
+  # candidate to keep host-side (it would then cost guest GPU compute until the
+  # guest gets a virtual host1x).
   engines = [
     "17000000.gpu"
     "13e00000.host1x_pt"
@@ -49,13 +73,45 @@ let
     "15480000.nvdec"
     "15540000.nvjpg"
   ];
-  allDevs = (map (r: r.dev) reservedMem) ++ engines;
+  # Keyhole MMIO passthrough: the single 4KB read-only EVO display-capabilities
+  # strap page (display base + 0x30000 = 0x13830000), placed in the guest at its
+  # display-aperture caps offset (0x66200000 + 0x30000 = 0x66230000) via the
+  # mmio-base form. This backs the guest nvdisplay EvoGetCapabilities read
+  # WITHOUT handing over the display control aperture (which requires rewriting
+  # display@13800000 and kills the host DCE R5). See gpu_passthrough_overlay.dts
+  # fragment@9. The guest display@13800000 node already declares the full
+  # aperture; only this one page is backed, so any OTHER display-register access
+  # the guest attempts still aborts -- which is how we discover the guest's real
+  # MMIO footprint.
+  # Second keyhole: the EVO channel doorbell (PUT/GET) register region -- core
+  # at display+0x70000 and window channels from display+0x80000 -- mapped into
+  # the guest at its display-aperture offset (0x66200000 + 0x70000 = 0x66270000),
+  # size 0x20000. The guest nvkms writes PUT to these display MMIO registers to
+  # tell the DCE R5 to fetch a channel's pushbuffer; without them backed, the
+  # window channel's GET pointer never advances. See gpu_passthrough_overlay.dts
+  # fragment@10. CPU-RM-facing user doorbells (guest is the CPU RM); R5-safe.
+  # NOTE: dpaux0 (0x155C0000) and MIPI_CAL (0x03990000) are deliberately NOT
+  # keyholed. They were tried and proved INERT: on T234D the CPU-side RM never
+  # instantiates OBJDPAUX, so no guest code touches those registers -- EDID and AUX
+  # are RmControl -> DCE-RPC, serviced by the R5, which owns the pads. Keyholing
+  # them changed nothing on hardware.
+  dispCaps = [
+    {
+      dev = "13830000.disp_caps_pt";
+      base = "0x66230000";
+    }
+    {
+      dev = "13870000.disp_chan_pt";
+      base = "0x66270000";
+    }
+  ];
+  allDevs = (map (r: r.dev) (reservedMem ++ dispCaps)) ++ engines;
 
   vfioArgs =
     (lib.concatMap (r: [
       "-device"
       "vfio-platform,host=${r.dev},mmio-base=${r.base}"
-    ]) reservedMem)
+    ]) (reservedMem ++ dispCaps))
     ++ (lib.concatMap (d: [
       "-device"
       "vfio-platform,host=${d}"
@@ -136,17 +192,19 @@ in
     #   vic@15340000    clock 167           reset 113   pd 29
     #   nvdec@15480000  clocks 83 40 154    reset 44    pd 23
     #   nvjpg@15540000  clock 20            reset 10    pd 36
-    # display/dce excluded (compute-only). "clock not allowed" logs for probed
-    # parent clocks are the boundary working; add a denied id here only if init
-    # actually fails on it.
-    #
-    # Shared BPMP trust domain: the host proxy enforces one allow-list (union
-    # across all passthroughs, incl. net-vm's MGBE0) and gates by resource id
-    # only, not by issuing guest. gpu-vm and net-vm share /dev/bpmp-host, so a
-    # compromised one can MRQ_RESET the other's ids -- they are one trust domain.
-    # The host stays protected (list scoped, bpmpAllowAllDomains off, asserted
-    # above). A per-VM proxy would remove the residual guest<->guest reach.
+    # display@13800000 is host-side now (the R5 drives it), so the guest no
+    # longer requests these display clock/reset/power-domain ids -- but they are
+    # left in the closed allow-list harmlessly (still NOT allow-all) so the list
+    # need not change again if the guest re-acquires a display path. They are the
+    # exact ids the guest display@13800000 node declares (TEGRA234_CLK_* /
+    # RESET_* / POWER_DOMAIN_* resolved against tegra234 dt-bindings). dce@d800000
+    # needs no ids: the host owns the real DCE and the guest's synthetic dce node
+    # has no clocks. As with MGBE0, the host proxy logging "clock not allowed" for
+    # probed parent PLLs the guest re-checks is the boundary working; add an id
+    # here only if display/GPU init actually fails on that specific denied id
+    # (Task 10).
     ghaf.hardware.nvidia.virtualization.host.bpmp.allow = {
+      # compute engines (see per-device breakdown above)
       clocks = [
         1
         20
@@ -158,19 +216,110 @@ in
         167
         236
         304
+      ]
+      # 13800000.display: nvdisplayhub/disp/p0/p1, dpaux, fuse, the DSI/SP/V
+      # PLL tree, RG/SOR/SF paths, mipi-cal, osc, dsc, maud, aza.
+      ++ [
+        # Root parents of the SOR clock tree. The guest's clk_prepare_enable
+        # on sor0 propagates enables up to these; a denied parent fails the
+        # WHOLE chain, so the SOR never turns on (no video signal despite a
+        # completed modeset -- observed as CLK_ENABLE (cmd 7) denials for 14
+        # and 102 at display init). Host-critical always-on roots: a guest
+        # enable is a BPMP refcount no-op, and the guest runs
+        # clk_ignore_unused so it never mass-disables them.
+        14 # TEGRA234_CLK_CLK_M
+        102 # TEGRA234_CLK_PLLP_OUT0
+        19
+        40
+        71
+        72
+        84
+        85
+        86
+        87
+        88
+        91
+        125
+        126
+        127
+        128
+        129
+        130
+        132
+        162
+        178
+        179
+        180
+        181
+        182
+        183
+        184
+        # NOTE: the guest display RM also probes host-critical clocks during
+        # its clock-tree walk (observed denials 429-434=CPU DSU/SCE/RCE/DCE_CPU,
+        # 472=MCHUB, etc). Those denials are CORRECT and HARMLESS (the host
+        # already runs them) and must STAY denied -- never add CPU/coprocessor/
+        # memory clocks here. The list above is exactly the 62 clock ids the
+        # guest display@13800000 node declares (computed from the guest 6.12
+        # tegra234-clock.h), which is the complete closed display set.
+        435
+        436
+        437
+        438
+        439
+        440
+        441
+        442
+        443
+        444
+        445
+        446
+        447
+        448
+        449
+        450
+        451
+        452
+        453
+        454
+        455
+        456
+        457
+        458
+        459
+        460
+        461
+        462
+        463
+        464
+        465
+        466
+        467
+        468
+        469
+        470
+        471
       ];
+      # compute resets ++ display (nvdisplay 16, dpaux 8, dsi-core 3, mipi-cal 37)
       resets = [
         10
         19
         44
         113
+      ]
+      ++ [
+        3
+        8
+        16
+        37
       ];
+      # compute power-domains ++ display DISP (3)
       powerDomains = [
         23
         29
         35
         36
-      ];
+      ]
+      ++ [ 3 ];
     };
 
     services.udev.extraRules = ''
@@ -233,27 +382,221 @@ in
       (
         { config, pkgs, ... }:
         {
-          # Guest kernel = vanilla 6.12 + jetpack OOT overlay (bring-your-own),
-          # GPU passthrough patches on nvidia-oot-modules. 0003 (display) is
-          # intentionally NOT applied: out of scope here, and it forces the
-          # Xen dom0/vgx predicates TRUE -- dead, risky in a compute build.
+          # DRM userspace: this nvidia-drm build has no fbdev support (it rejects
+          # nvidia-drm.fbdev with "unknown parameter"), so there is no fbcon to
+          # trigger a modeset -- the connector is detected with a full mode list but
+          # nothing ever asks for a mode, so the panel stays dark. Ship modetest so a
+          # modeset can be driven from userspace until a compositor runs here.
+          environment.systemPackages =
+            let
+              # Forces plain no-modifier GBM window surfaces; see the shim
+              # source for why the modifier path EGL_BAD_ALLOCs on this guest.
+              gbm-nomod-shim = pkgs.runCommandCC "gbm-nomod-shim" { } ''
+                mkdir -p $out/lib
+                $CC -O2 -fPIC -shared -o $out/lib/gbm-nomod-shim.so \
+                  ${./sources/gbm-nomod-shim.c} -ldl
+              '';
+              kmscube-wrapped =
+                pkgs.runCommand "kmscube-nomod"
+                  {
+                    nativeBuildInputs = [ pkgs.buildPackages.makeWrapper ];
+                  }
+                  ''
+                    mkdir -p $out/bin
+                    makeWrapper ${pkgs.kmscube}/bin/kmscube $out/bin/kmscube \
+                      --set LD_PRELOAD ${gbm-nomod-shim}/lib/gbm-nomod-shim.so
+                  '';
+            in
+            [
+              pkgs.libdrm
+              kmscube-wrapped
+              # Graphics ABI verification (accelerated-rendering bring-up):
+              # eglinfo/eglgears to prove the NVIDIA EGL implementation and a
+              # GA10B renderer string, drm_info to map render/KMS nodes.
+              pkgs.mesa-demos
+              pkgs.drm_info
+            ];
+
+          # NVIDIA/Jetson graphics userspace (EGL/GLES/GBM) via
+          # /run/opengl-driver, mirroring jetpack-nixos modules/graphics.nix.
+          # The guest cannot enable hardware.nvidia-jetpack (BYO kernel), so
+          # lift just the userspace wiring. l4t-3d-core ships the GL vendor
+          # libs; the extras carry their runtime deps (nvrm/gbm/wayland/nvsci).
+          hardware.graphics = {
+            enable = true;
+            # l4t-3d-core with its bundled libnvidia-egl-gbm 1.1.0 shadowed by
+            # nixpkgs egl-gbm 1.1.3: the 1.1.0 EGL GBM platform heap-corrupts
+            # eglInitialize under mesa 26's libgbm (surfaceless/device
+            # platforms are fine). First path wins in the join; drop the l4t
+            # json so the platform module isn't loaded twice.
+            package = pkgs.symlinkJoin {
+              name = "l4t-3d-core-egl-gbm-1.1.3";
+              paths = [
+                # single-device fallback: on Tegra the EGL device's DRM node
+                # (tegra-drm) never path-matches the gbm fd (nvidia-drm), so
+                # stock matching always fails eglInitialize on GBM.
+                (pkgs.egl-gbm.overrideAttrs (o: {
+                  patches = (o.patches or [ ]) ++ [
+                    ./patches/userspace/egl-gbm-single-device-fallback.patch
+                  ];
+                }))
+                pkgs.nvidia-jetpack.l4t-3d-core
+              ];
+              postBuild = ''
+                rm -f $out/share/egl/egl_external_platform.d/nvidia_gbm.json
+              '';
+            };
+            extraPackages =
+              (with pkgs.nvidia-jetpack; [
+                l4t-core
+                l4t-cuda
+                l4t-nvsci
+                l4t-wayland
+              ])
+              ++ [
+                # l4t-gbm minus its bundled libnvidia-egl-gbm 1.1.0 (and its
+                # platform json): the nixpkgs egl-gbm 1.1.3 in `package`
+                # provides that library; keep only the nvidia-drm_gbm backend.
+                (pkgs.symlinkJoin {
+                  name = "l4t-gbm-sans-egl-gbm";
+                  paths = [ pkgs.nvidia-jetpack.l4t-gbm ];
+                  postBuild = ''
+                    rm -f $out/lib/libnvidia-egl-gbm.so*
+                    rm -f $out/share/egl/egl_external_platform.d/nvidia_gbm.json
+                  '';
+                })
+              ];
+          };
+          # libEGL_nvidia.so.0 discovers its EGL platform modules here.
+          environment.etc."egl/egl_external_platform.d".source =
+            "${pkgs.addDriverRunpath.driverLink}/share/egl/egl_external_platform.d/";
+
+          # Guest kernel = vanilla 6.12 + jetpack OOT overlay (Bring-Your-Own-
+          # Kernel), with the GPU passthrough patches applied to
+          # nvidia-oot-modules (validated: base OOT builds clean on 6.12.93).
+          # 0003 (display passthrough) is intentionally NOT applied: display is
+          # out of scope for this compute-only VM, and it force-returns the Xen
+          # dom0/vgx virtualization predicates TRUE -- dead, risky code in a
+          # compute build.
           boot.kernelPackages = lib.mkForce (
             (pkgs.linuxPackages_6_12.extend pkgs.nvidia-jetpack.kernelPackagesOverlay).extend (
               _final: prev: {
                 nvidia-oot-modules = prev.nvidia-oot-modules.overrideAttrs (o: {
-                  patches = (o.patches or [ ]) ++ [
-                    ./patches/0001-gpu-add-support-for-passthrough.patch
-                    ./patches/0002-add-support-for-gpu-display-passthrough.patch
-                  ];
+                  patches =
+                    (o.patches or [ ])
+                    ++ [
+                      ./patches/0001-gpu-add-support-for-passthrough.patch
+                      ./patches/0002-add-support-for-gpu-display-passthrough.patch
+                      ./patches/0003-add-support-for-display-passthrough.patch
+                      # Force NISO display surfaces (channel pushbuffer, notifier,
+                      # semaphores) contiguous so they land in the 1:1 physical
+                      # carveout the host DCE R5 can resolve -- otherwise the window
+                      # channel never advances ("waiting for GPU progress", NVC67E).
+                      ./patches/0005-force-niso-display-surfaces-contiguous.patch
+                      # Address policy for everything handed to the host-owned DCE
+                      # R5 (inst-mem base, channel pushbuffers, ctxdma FrameAddrs):
+                      # CPU physical (1:1 GPA=HPA carveout), offset into the native
+                      # display high-IOVA range (raw physicals abort the R5's
+                      # UPDATE), absolute ctxdma Limit computed after the offset.
+                      # The host maps hi->carveout in the display SMMU domains and
+                      # retags the scanout readers' MC SIDs (dce-iso-anchor).
+                      ./patches/0006-dce-addresses-cpu-phys-high-iova.patch
+                      # DP++ dual-mode: a passive HDMI adapter asserts HPD but has
+                      # no DP sink; trust RM's DDC/LOAD detection over the DP lib's
+                      # HPD-only guess so detection falls through to the TMDS
+                      # partner displayId where the sink really is.
+                      ./patches/0008-fix-dual-mode-honor-rm-connect-state.patch
+                      # Core notifier: plain WRITE, never WRITE_AWAKEN -- the
+                      # awaken rides the DCE async event path the guest cannot
+                      # receive and the R5 aborts the whole completion write.
+                      # NB: dropping this to get awaken-paced completions was
+                      # retried 2026-07-17 WITH the ch3 relay live: flips stop
+                      # completing entirely (modetest -v never reports a freq).
+                      # The R5-side abort is not about the guest lacking an
+                      # event path; keep plain WRITE.
+                      ./patches/0009-core-notifier-plain-write-no-awaken.patch
+                      # Boot hotplug: a panel connected at boot produces no HPD
+                      # edge, so the host DCE never sends the hotplug event and
+                      # the SOR is never assigned (dark until manual replug).
+                      # Schedule the same deferred hotplug work once at init.
+                      ./patches/0020-synthesize-boot-hotplug-long-pulse.patch
+                      # Flip pacing: the host DCE R5 consumes each flip kickoff
+                      # in ~250us (GET catches PUT immediately, measured) but
+                      # posts the flip-completion event ~130ms later, capping
+                      # flips at ~8-10fps. The immediate WRITE_AWAKEN path is
+                      # rejected by the R5 (0009). So deliver the flip-occurred
+                      # ourselves one 60Hz frame after kickoff; a put-offset
+                      # guard suppresses the R5's late duplicate. Restores
+                      # ~60fps.
+                      ./patches/0010-dce-synthetic-flip-completion.patch
+                    ]
+                    # dce-dbg bring-up instrumentation (ctxdma/pushbuffer/instmem
+                    # FE-arming params, DISPRM RPC + payload hexdumps, core PB
+                    # dumps, DP attach + SOR assignment + RG probes). Applies on
+                    # top of the functional set; flip gpuvmDceDebug to enable.
+                    ++ lib.optionals gpuvmDceDebug [
+                      ./patches/debug/0001-dce-debug-instrumentation.patch
+                      ./patches/debug/0002-dce-debug-async-event-dispatch.patch
+                      ./patches/debug/0003-dce-debug-flip-occurred-path.patch
+                      ./patches/debug/0004-dce-debug-event-interest.patch
+                      ./patches/debug/0005-dce-debug-flip-delivered.patch
+                      ./patches/debug/0006-dce-debug-flip-rm-callback.patch
+                    ];
+                  # DCE display proxy (guest side): redirect the guest's DCE IPC
+                  # through the shared MMIO window and skip the R5 bootstrap (the
+                  # R5 is host-owned). The hook patch is written against the
+                  # nvidia-oot project root (no nvidia-oot/ prefix) so apply it
+                  # scoped to nvidia-oot/; splice the guest proxy in as its own
+                  # obj-m .ko (it links tegra-dce's exported symbols, so it must
+                  # build inside nvidia-oot).
+                  postPatch = (o.postPatch or "") + ''
+                    patch -p1 -d nvidia-oot < ${../../common/dce-virt-common/patches/0001-dce-virt-hooks.patch}
+                    # Reverse-doorbell stage 2: export the async-event injector
+                    # the guest proxy uses to deliver relayed ch3 events to
+                    # nvdisplay's RM_EVENT client.
+                    patch -p1 -d nvidia-oot < ${../../common/dce-virt-common/patches/0002-dce-client-ipc-inject.patch}
+                    install -D ${../../common/dce-virt-common/sources/drivers/platform/tegra/dce-guest-proxy/dce-guest-proxy.c} \
+                      nvidia-oot/drivers/platform/tegra/dce/dce-guest-proxy.c
+                    echo 'obj-m += dce-guest-proxy.o' >> nvidia-oot/drivers/platform/tegra/dce/Makefile
+                  '';
                 });
               }
             )
           );
-          # Safety params: without them the guest can gate off clocks/domains the
-          # host still uses. Asserted present below.
+          # nvidia-drm.modeset=1 + fbdev=1: bring up the NVIDIA KMS layer and its
+          # framebuffer console. fbcon drawing to the panel is the modeset TRIGGER
+          # that makes nvdisplay actually bring up the display -> DCE handshake
+          # through the proxy -> scanout. Without a modeset request nothing drives
+          # the display (the device binds but stays idle).
           boot.kernelParams = [
             "clk_ignore_unused"
             "pd_ignore_unused"
+            "nvidia-drm.modeset=1"
+            # 16M kernel ring: the dce-dbg method/control dumps otherwise wrap
+            # the default ring within seconds and destroy every capture.
+            "log_buf_len=16M"
+            # Never auto-disable vblank interrupts. nvidia-drm disables them
+            # the moment the last flip completes; under the DCE proxy each
+            # re-enable is a synchronous EVENT_SET_NOTIFICATION RPC to the R5
+            # (~10ms) plus a slow stream restart, which quantized flips to
+            # ~122ms (~8 fps). With the vblank stream always on, the R5 emits
+            # completions at the 60Hz vblank cadence (confirmed host-side).
+            "drm.vblankoffdelay=0"
+            # NB: this nvidia-drm build REJECTS fbdev ("unknown parameter 'fbdev'
+            # ignored"), so there is no framebuffer console here and nothing
+            # automatically requests a modeset -- the connector is detected with a
+            # full mode list but stays unlit until a DRM client sets a mode. Kept
+            # only so it takes effect if a driver that supports it is used later.
+            "nvidia-drm.fbdev=1"
+            # NOTE: do NOT add "video=DP-1:...e" here. The trailing 'e' forces the
+            # connector on (DRM_FORCE_ON), which makes nvidia-drm set
+            # forceConnected, and nvDpyGetDynamicData then short-circuits to
+            # "connected" for the DisplayPort displayId before it ever consults the
+            # DP lib or RM. The AGX DP port is DP++ dual-mode (0x100 SOR_DP_A and
+            # 0x200 SINGLE_TMDS_A are one physical connector sharing a DRM connector
+            # with two encoders); forcing the DP encoder on stops connector detect at
+            # it, so the TMDS partner -- where a passive HDMI adapter's sink actually
+            # lives -- is never probed, and every EDID read fails on AUX forever.
           ];
 
           assertions = [
@@ -274,6 +617,21 @@ in
             "host1x"
             "nvhost"
             "nvgpu"
+            # DCE display proxy (guest): tegra-dce binds the synthetic dce node
+            # (dce-virtual-pa, no reg) in proxy mode; dce-guest-proxy binds the
+            # nvidia,dce-guest-proxy node, ioremaps the shared window and installs
+            # the send redirect. Neither autoloads from a DT match (OOT modules),
+            # so load them explicitly. dce-guest-proxy links tegra-dce's exported
+            # redirect symbol, so modprobe orders tegra-dce first.
+            "tegra-dce"
+            "dce-guest-proxy"
+            # Display KMS stack: gives the guest a /dev/dri KMS device + crtcs for
+            # display@13800000 (bound by nv_platform). With nvidia-drm.modeset=1 +
+            # fbdev=1 (kernelParams) fbcon draws to the panel -> the modeset that
+            # makes nvdisplay bring up the display -> DCE handshake via the proxy.
+            # nvidia-drm pulls nvidia-modeset + nvidia via module deps.
+            "nvidia-modeset"
+            "nvidia-drm"
           ];
 
           # gk20a loads falcon microcode from /lib/firmware at probe; without it
@@ -309,6 +667,12 @@ in
                 PM_GENERIC_DOMAINS = yes;
                 # Required by NVIDIA Bring-Your-Own-Kernel for the OOT modules.
                 ARM64_PMEM = yes;
+                # DIAGNOSTIC: allow guest /dev/mem access to the 1:1 carveouts
+                # and claimed display MMIO (DCE notifier poison/GET-PUT tests).
+                # Drop for release.
+                STRICT_DEVMEM = lib.mkForce no;
+                # STRICT_DEVMEM=n hides this prompt; `option` tolerates it being unused.
+                IO_STRICT_DEVMEM = lib.mkForce (option no);
               };
             }
           ];
