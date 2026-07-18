@@ -1,6 +1,6 @@
 --- a/nvdisplay/src/nvidia-modeset/src/nvkms-evo.c
 +++ b/nvdisplay/src/nvidia-modeset/src/nvkms-evo.c
-@@ -4292,11 +4292,14 @@
+@@ -4292,11 +4292,15 @@
  static void CompletionNotifierEvent(void *arg, void *pEventDataVoid,
                                      NvU32 hEvent, NvU32 Data, NV_STATUS Status)
  {
@@ -9,14 +9,15 @@
 -        arg, /* argument (this is a ref_ptr to NVDispFlipOccurredEventDataEvoRec) */
 -        0,   /* dataU32 */
 -        0);  /* timeout: schedule the work immediately */
-+  /* dce passthrough: the host DCE R5 posts this flip-completion event
-+   * ~130ms after kickoff, capping flips at ~8-10fps. Drop it. The guest
-+   * completes flips from the hardware-written KAPI completion notifier
-+   * instead: nvidia-drm polls it (see nvKmsKapiGetFlipPendingStatus /
-+   * the DRM flip-poll thread) and delivers the DRM page-flip event when
-+   * the notifier reaches FINISHED. Delivering this too would either
-+   * double-complete or (being 130ms late) tear. */
++  /* R5-completion experiment, TRACE-ONLY (handoff Blocker 1): a real R5
++   * flip-completion event arrived. Log its identity, then DROP it -- the
++   * two-vblank path (0013) still completes DRM this stage, so delivering
++   * here would double-complete. 0010 is removed entirely in Phase C to
++   * restore native completion. */
++  nvEvoLog(EVO_LOG_INFO,
++           "dce-r5-evt: hEvent=0x%08x Data=0x%08x Status=0x%08x\n",
++           hEvent, Data, (NvU32) Status);
 +  (void) arg;
  }
- 
+
  void nvEvoPreModesetRegisterFlipOccurredEvent(NVDispEvoRec *pDispEvo,

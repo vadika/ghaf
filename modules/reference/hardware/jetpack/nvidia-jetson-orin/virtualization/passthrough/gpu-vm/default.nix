@@ -513,16 +513,22 @@ in
                       # the SOR is never assigned (dark until manual replug).
                       # Schedule the same deferred hotplug work once at init.
                       ./patches/0020-synthesize-boot-hotplug-long-pulse.patch
-                      # Drop the host DCE R5's flip-completion event: it
-                      # arrives ~130ms after kickoff (caps flips at ~8-10fps).
-                      # The flip is instead completed from the hardware-written
-                      # KAPI completion notifier, polled by nvidia-drm (0013).
+                      # Trace-and-drop the host DCE R5's flip-completion event
+                      # (handoff Blocker 1): 0011 below re-enables WRITE_AWAKEN
+                      # on the active-primary window notifier so the R5 now
+                      # generates a real per-flip completion; this patch logs
+                      # its hEvent/Data/Status and still drops it -- the
+                      # two-vblank path (0013) is what completes DRM this
+                      # stage, so delivering the R5 event too would
+                      # double-complete. Removed entirely in Phase C, when the
+                      # R5 event becomes the real completion source.
                       ./patches/0010-dce-drop-r5-completion-event.patch
-                      # Window-channel completion notifier: plain WRITE, never
-                      # WRITE_AWAKEN -- same R5 abort as the core channel
-                      # (0009). Required so the KAPI completion-notifier memory
-                      # actually lands in DRAM and can be polled for real flip
-                      # completion (0013, the notifier-poll rework).
+                      # Window-channel completion notifier: restore
+                      # WRITE_AWAKEN, but only for an active window with a
+                      # committed surface (pSurfaceEvo[NVKMS_LEFT] != NULL) --
+                      # an inactive overlay notifier must never raise a second
+                      # R5 abort source. This is what makes 0010's R5 event
+                      # real; 0013 still owns DRM completion this stage.
                       ./patches/0011-window-notifier-plain-write.patch
                       # DRM-side flip completion via vblank qualification: the
                       # completion notifier is not a usable per-flip signal in
