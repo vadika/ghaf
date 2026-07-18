@@ -32,7 +32,7 @@
 +    } flipVblank[NVKMS_KAPI_MAX_HEADS][NVKMS_KAPI_LAYER_MAX];
 +    NvU32 vblankCbSeq[NVKMS_KAPI_MAX_HEADS];  /* physical vblank callbacks/head */
 +    NvBool flipVblankRefHeld[NVKMS_KAPI_MAX_HEADS];
-+    NvU32 flipVblankGeneration;
++    NvU32 flipVblankGeneration[NVKMS_KAPI_MAX_HEADS];
 +    atomic_t flipVblankEnabled;
 +
  #endif
@@ -102,11 +102,11 @@
 +    for (h = 0; h < NVKMS_KAPI_MAX_HEADS; h++) {
 +        nv_dev->flipVblankRefHeld[h] = NV_FALSE;
 +        nv_dev->vblankCbSeq[h] = 0;
++        nv_dev->flipVblankGeneration[h] = 0;
 +        for (l = 0; l < NVKMS_KAPI_LAYER_MAX; l++) {
 +            nv_dev->flipVblank[h][l].armed = NV_FALSE;
 +        }
 +    }
-+    nv_dev->flipVblankGeneration = 0;
 +    atomic_set(&nv_dev->flipVblankEnabled, 1);
 +}
 +
@@ -125,8 +125,8 @@
 +    atomic_set(&nv_dev->flipVblankEnabled, 0);
 +
 +    spin_lock_irqsave(&dev->event_lock, flags);
-+    nv_dev->flipVblankGeneration++;
 +    for (h = 0; h < NVKMS_KAPI_MAX_HEADS; h++) {
++        nv_dev->flipVblankGeneration[h]++;
 +        for (l = 0; l < NVKMS_KAPI_LAYER_MAX; l++) {
 +            nv_dev->flipVblank[h][l].armed = NV_FALSE;
 +        }
@@ -185,7 +185,7 @@
 +             * (unsigned subtraction handles vblankCbSeq wrap).
 +             */
 +            if ((nv_dev->flipVblank[head][layer].generation ==
-+                 nv_dev->flipVblankGeneration) &&
++                 nv_dev->flipVblankGeneration[head]) &&
 +                ((nv_dev->vblankCbSeq[head] -
 +                  nv_dev->flipVblank[head][layer].armCbSeq) >=
 +                 NV_DRM_FLIP_VBLANK_QUALIFY)) {
@@ -280,7 +280,7 @@
 +        nv_dev->flipVblank[head][layer].armCbSeq =
 +            nv_dev->vblankCbSeq[head];
 +        nv_dev->flipVblank[head][layer].generation =
-+            nv_dev->flipVblankGeneration;
++            nv_dev->flipVblankGeneration[head];
 +        armed = NV_TRUE;
 +    }
 +    spin_unlock_irqrestore(&dev->event_lock, flags);
@@ -289,13 +289,13 @@
 +}
 +
 +/*
-+ * Invalidate all in-flight arms across every head on a modeset (bumping the
-+ * shared generation), and drop this crtc's qualification vblank reference if
-+ * held. A modeset changes the vblank timing contract for the crtcs involved,
-+ * so any arm snapshotted against the old vblankCbSeq sequence is stale;
-+ * invalidating every head (not just the one being modeset) is intentional and
-+ * safe -- a modeset is rare, and a stray extra vblank wait on an unrelated
-+ * head is harmless.
++ * Invalidate this head's in-flight arms on a modeset (bumping only this
++ * head's generation, so arms on other heads are untouched), and drop this
++ * crtc's qualification vblank reference if held. A modeset changes the vblank
++ * timing contract for this crtc, so any arm snapshotted against the old
++ * vblankCbSeq is stale; the generation bump makes on_callback skip those
++ * stale arms (the blocking commit's own new flip re-arms and completes). A
++ * modeset is rare.
 + */
 +void nv_drm_flip_vblank_reset_on_modeset(struct nv_drm_device *nv_dev,
 +                                         struct nv_drm_crtc *nv_crtc)
@@ -311,7 +311,7 @@
 +    }
 +
 +    spin_lock_irqsave(&dev->event_lock, flags);
-+    nv_dev->flipVblankGeneration++;
++    nv_dev->flipVblankGeneration[head]++;
 +    for (layer = 0; layer < NVKMS_KAPI_LAYER_MAX; layer++) {
 +        nv_dev->flipVblank[head][layer].armed = NV_FALSE;
 +    }
