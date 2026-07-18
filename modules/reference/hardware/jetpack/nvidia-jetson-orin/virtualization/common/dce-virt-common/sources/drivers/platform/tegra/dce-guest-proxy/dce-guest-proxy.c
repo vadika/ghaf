@@ -23,6 +23,7 @@
 #include <linux/string.h>
 #include <linux/kthread.h>
 #include <linux/delay.h>
+#include <linux/debugfs.h>
 #include <linux/platform/tegra/dce/dce-client-ipc.h>
 
 #define DEVICE_NAME "dce-guest"
@@ -67,6 +68,7 @@ MODULE_VERSION("0.1");
 
 static void __iomem *mem_iova;
 static struct task_struct *dce_evt_task;
+static struct dentry *dce_virt_dbg;
 
 /*
  * The window is a single shared MMIO region reused for every transaction, so
@@ -149,6 +151,7 @@ static int dce_evt_poll_fn(void *arg)
 {
 	static u8 evbuf[EVT_MAX];	/* single kthread; off the 8K stack */
 	u32 last_seq = 0;
+	int ret;
 
 	while (!kthread_should_stop()) {
 		u32 seq = readl(mem_iova + EVT_SEQ);
@@ -165,14 +168,18 @@ static int dce_evt_poll_fn(void *arg)
 			pr_debug("dce_guest_proxy: EVENT seq=%u iface=%u size=%u\n",
 				 seq, iface, size);
 
-			/* Stage 2: hand the event to the client nvdisplay
-			 * registered (RM_EVENT), exactly as the native IVC
-			 * delivery would. iface is the host-side client type;
-			 * both sides share dce-client-ipc.h so it passes
-			 * through unchanged. */
-			if (tegra_dce_client_ipc_inject(iface, size, evbuf))
-				pr_warn("dce_guest_proxy: no client for iface=%u, event dropped\n",
-					iface);
+			/* Copy into tegra-dce's FIFO. ACK only on success so a
+			 * full FIFO leaves EVT_ACK unchanged and the QEMU pump
+			 * re-presents the same slot -- an opaque event is never
+			 * dropped (handoff Blocker 2). */
+			ret = tegra_dce_client_ipc_inject(iface, size, evbuf);
+			if (ret == -ENOSPC) {
+				usleep_range(500, 1000);
+				continue;	/* re-read same seq, do NOT ack */
+			}
+			if (ret == -ENOENT || ret == -EINVAL)
+				pr_warn_ratelimited("dce_guest_proxy: event iface=%u dropped (ret=%d)\n",
+						    iface, ret);
 
 			last_seq = seq;
 			writel(seq, mem_iova + EVT_ACK);	/* unblock next */
@@ -187,6 +194,7 @@ static int dce_evt_poll_fn(void *arg)
 static int dce_guest_proxy_probe(struct platform_device *pdev)
 {
 	u64 vpa = 0;
+	int ret;
 
 	if (of_property_read_u64(pdev->dev.of_node, "dce-virtual-pa", &vpa) ||
 	    !vpa) {
@@ -202,7 +210,26 @@ static int dce_guest_proxy_probe(struct platform_device *pdev)
 
 	dev_info(&pdev->dev, "dce-virtual-pa: 0x%llX -> %p\n", vpa, mem_iova);
 
-	/* Route every guest DCE client send through the shared window. */
+	/* Ordered worker for the no-drop event FIFO -- must be up before the
+	 * poll thread starts injecting into it. Bring it up BEFORE publishing
+	 * the send redirect, so a start failure cannot leave a dangling
+	 * tegra_dce_ipc_send_redirect pointing into the unmapped window. */
+	ret = tegra_dce_virt_event_start();
+	if (ret) {
+		dev_err(&pdev->dev, "virt-event wq start failed: %d\n", ret);
+		iounmap(mem_iova);
+		mem_iova = NULL;
+		return ret;
+	}
+
+	dce_virt_dbg = debugfs_create_dir("dce-virt", NULL);
+	debugfs_create_atomic_t("enqueued",  0444, dce_virt_dbg, tegra_dce_virt_counter(0));
+	debugfs_create_atomic_t("full",      0444, dce_virt_dbg, tegra_dce_virt_counter(1));
+	debugfs_create_atomic_t("delivered", 0444, dce_virt_dbg, tegra_dce_virt_counter(2));
+	debugfs_create_atomic_t("noclient",  0444, dce_virt_dbg, tegra_dce_virt_counter(3));
+
+	/* Route every guest DCE client send through the shared window -- only
+	 * now that the FIFO worker is live and cannot fail this probe. */
 	tegra_dce_ipc_send_redirect = my_dce_ipc_send;
 
 	/* Start draining the reverse window (async DCE notifications). */
@@ -221,12 +248,15 @@ static int dce_guest_proxy_probe(struct platform_device *pdev)
 static void dce_guest_proxy_remove(struct platform_device *pdev)
 {
 	if (dce_evt_task) {
-		kthread_stop(dce_evt_task);
+		kthread_stop(dce_evt_task);	/* no new injects after this */
 		dce_evt_task = NULL;
 	}
+	debugfs_remove_recursive(dce_virt_dbg);
+	dce_virt_dbg = NULL;
+	tegra_dce_virt_event_stop();		/* flush + destroy the wq */
 	tegra_dce_ipc_send_redirect = NULL;
 	if (mem_iova) {
-		iounmap(mem_iova);
+		iounmap(mem_iova);		/* only after the wq is gone */
 		mem_iova = NULL;
 	}
 }

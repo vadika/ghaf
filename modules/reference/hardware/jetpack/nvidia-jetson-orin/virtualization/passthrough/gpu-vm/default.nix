@@ -520,15 +520,26 @@ in
                       # the SOR is never assigned (dark until manual replug).
                       # Schedule the same deferred hotplug work once at init.
                       ./patches/0020-synthesize-boot-hotplug-long-pulse.patch
-                      # Flip pacing: the host DCE R5 consumes each flip kickoff
-                      # in ~250us (GET catches PUT immediately, measured) but
-                      # posts the flip-completion event ~130ms later, capping
-                      # flips at ~8-10fps. The immediate WRITE_AWAKEN path is
-                      # rejected by the R5 (0009). So deliver the flip-occurred
-                      # ourselves one 60Hz frame after kickoff; a put-offset
-                      # guard suppresses the R5's late duplicate. Restores
-                      # ~60fps.
-                      ./patches/0010-dce-synthetic-flip-completion.patch
+                      # Drop the host DCE R5's flip-completion event: it lands
+                      # ~130ms after kickoff (~8-10fps ceiling) and is not a
+                      # usable per-flip signal under passthrough. Completion
+                      # is driven by 0013's vblank qualification instead.
+                      ./patches/0010-dce-drop-r5-completion-event.patch
+                      # Window-channel completion notifier: plain WRITE,
+                      # never WRITE_AWAKEN -- same R5 abort as the core
+                      # channel (0009). Native-R5 60fps completion
+                      # (WRITE_AWAKEN gated on the active primary) is blocked
+                      # on an intermittent window-channel BEGUN->FINISHED
+                      # latch failure at 60fps kickoff (closed R5 firmware);
+                      # see branch native-r5-experimental.
+                      ./patches/0011-window-notifier-plain-write.patch
+                      # Complete each committed flip after 2 physical vblank
+                      # callbacks since it was armed -- a scanout-latch
+                      # margin coherent with scanout, tear-free at ~30fps.
+                      # The R5-latch-reliable path while native-R5 60fps
+                      # completion stays blocked on closed R5/window-channel
+                      # firmware.
+                      ./patches/0013-drm-vblank-flip-completion.patch
                     ]
                     # dce-dbg bring-up instrumentation (ctxdma/pushbuffer/instmem
                     # FE-arming params, DISPRM RPC + payload hexdumps, core PB
