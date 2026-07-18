@@ -27,10 +27,7 @@ let
   # Flip to true to re-enable the dce-dbg bring-up instrumentation
   # (patches/debug/), which logs every DCE-facing address, RPC and payload.
   # Extremely chatty -- pair with the guest's log_buf_len bump.
-  # NOTE: temporarily forced to true (original default: false) to build the
-  # flip-awaken-contract instrumentation (patches/debug/0008-...). Restore to
-  # false once that diagnostic run is done.
-  gpuvmDceDebug = true;
+  gpuvmDceDebug = false;
   # Host-side virtualization config (sourcesPatch is defined here, not on the
   # guest). Captured from the host scope so the guest extraModules below can
   # reference it without the inner `config` shadow picking up the guest config.
@@ -516,18 +513,26 @@ in
                       # the SOR is never assigned (dark until manual replug).
                       # Schedule the same deferred hotplug work once at init.
                       ./patches/0020-synthesize-boot-hotplug-long-pulse.patch
-                      # Window-channel completion notifier: restore
-                      # WRITE_AWAKEN for an active-primary window only
-                      # (pSurfaceEvo[NVKMS_LEFT] != NULL) -- generates the real
-                      # per-flip R5 completion (measured 60/s, no abort).
-                      # Phase C trial (2026-07-18): the R5 event IS now the DRM
-                      # completion source -- 0010 (trace-drop) and 0013 (vblank
-                      # completion) are OUT of the list, so the native
-                      # CompletionNotifierEvent -> NVKMS -> KAPI -> nvidia-drm
-                      # chain delivers each flip. Testing whether native R5
-                      # completion alone gives tear-free 60fps before investing
-                      # in Blocker 2's ACK-decouple FIFO.
+                      # Drop the host DCE R5's flip-completion event: it lands
+                      # ~130ms after kickoff (~8-10fps ceiling) and is not a
+                      # usable per-flip signal under passthrough. Completion
+                      # is driven by 0013's vblank qualification instead.
+                      ./patches/0010-dce-drop-r5-completion-event.patch
+                      # Window-channel completion notifier: plain WRITE,
+                      # never WRITE_AWAKEN -- same R5 abort as the core
+                      # channel (0009). Native-R5 60fps completion
+                      # (WRITE_AWAKEN gated on the active primary) is blocked
+                      # on an intermittent window-channel BEGUN->FINISHED
+                      # latch failure at 60fps kickoff (closed R5 firmware);
+                      # see branch native-r5-experimental.
                       ./patches/0011-window-notifier-plain-write.patch
+                      # Complete each committed flip after 2 physical vblank
+                      # callbacks since it was armed -- a scanout-latch
+                      # margin coherent with scanout, tear-free at ~30fps.
+                      # The R5-latch-reliable path while native-R5 60fps
+                      # completion stays blocked on closed R5/window-channel
+                      # firmware.
+                      ./patches/0013-drm-vblank-flip-completion.patch
                     ]
                     # dce-dbg bring-up instrumentation (ctxdma/pushbuffer/instmem
                     # FE-arming params, DISPRM RPC + payload hexdumps, core PB
@@ -540,18 +545,6 @@ in
                       ./patches/debug/0004-dce-debug-event-interest.patch
                       ./patches/debug/0005-dce-debug-flip-delivered.patch
                       ./patches/debug/0006-dce-debug-flip-rm-callback.patch
-                      # Flip-completion awaken contract: logs the three
-                      # points where a kickoff's WRITE vs WRITE_AWAKEN
-                      # notifier mode is decided/consumed (nvidia-drm's
-                      # pending_events_plane_mask, KAPI's awaken flag, and
-                      # what EvoFlipC3Common actually programs after 0011's
-                      # ISO-surface gate) -- to catch a pending flip that
-                      # never gets its R5 awaken.
-                      ./patches/debug/0008-dce-debug-flip-awaken-contract.patch
-                      # Per-flip pre-syncpt probe: usingSyncpt + pre-syncpt id/
-                      # threshold, to test the unsatisfied-acquire-syncpt freeze
-                      # (window channel BEGUN but never latched -> no FINISHED).
-                      ./patches/debug/0009-dce-debug-flip-presyncpt.patch
                     ];
                   # DCE display proxy (guest side): redirect the guest's DCE IPC
                   # through the shared MMIO window and skip the R5 bootstrap (the

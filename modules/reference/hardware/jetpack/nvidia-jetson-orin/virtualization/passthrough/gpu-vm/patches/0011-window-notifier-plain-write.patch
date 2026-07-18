@@ -1,6 +1,6 @@
 --- a/nvdisplay/src/nvidia-modeset/src/nvkms-evo3.c
 +++ b/nvdisplay/src/nvidia-modeset/src/nvkms-evo3.c
-@@ -4321,13 +4321,18 @@
+@@ -4321,13 +4321,13 @@
          pSurfaceDesc = &pNIso->pSurfaceEvo->planes[0].surfaceDesc;
          offset = pNIso->offsetInWords / 4;
          ctrlVal = 0;
@@ -11,18 +11,13 @@
 -            ctrlVal = FLD_SET_DRF(C37E, _SET_NOTIFIER_CONTROL, _MODE,
 -                                  _WRITE, ctrlVal);
 -        }
-+        /* DCE passthrough R5-completion experiment (handoff Blocker 1):
-+         * re-enable WRITE_AWAKEN, but ONLY for an active window with a
-+         * committed surface, so an inactive overlay notifier cannot raise
-+         * a second R5 abort source. KAPI sets .awaken for committed layers. */
-+        if (pHwState->completionNotifier.awaken &&
-+            pHwState->pSurfaceEvo[NVKMS_LEFT] != NULL) {
-+            ctrlVal = FLD_SET_DRF(C37E, _SET_NOTIFIER_CONTROL, _MODE,
-+                                  _WRITE_AWAKEN, ctrlVal);
-+        } else {
-+            ctrlVal = FLD_SET_DRF(C37E, _SET_NOTIFIER_CONTROL, _MODE,
-+                                  _WRITE, ctrlVal);
-+        }
-
++        /* DCE host-proxy passthrough: plain WRITE, never WRITE_AWAKEN --
++         * same R5 abort as the core channel (0009). The completion notifier
++         * memory must land in DRAM so the guest can poll it for real flip
++         * completion (0013). */
++        (void) pHwState->completionNotifier.awaken;
++        ctrlVal = FLD_SET_DRF(C37E, _SET_NOTIFIER_CONTROL, _MODE,
++                              _WRITE, ctrlVal);
+ 
          SetWinNotifierSurfaceAddressAndControl(pChannel,
              pSurfaceDesc, offset, ctrlVal);

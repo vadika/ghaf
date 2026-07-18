@@ -1,6 +1,6 @@
 --- a/nvdisplay/kernel-open/nvidia-drm/nvidia-drm-priv.h
 +++ b/nvdisplay/kernel-open/nvidia-drm/nvidia-drm-priv.h
-@@ -137,6 +137,36 @@
+@@ -137,6 +137,37 @@
       */
      wait_queue_head_t flip_event_wq;
  
@@ -12,24 +12,25 @@
 +     * completion notifier is not a usable per-flip signal under passthrough
 +     * (the current flip's notifier reaches BEGUN but never FINISHED in the
 +     * guest-visible window). So a committed flip is armed AFTER submission and
-+     * completed on a post-kickoff vblank -- the scanout latch point, coherent
-+     * with scanout, so no tearing. Qualification is by DCE ingress sequence
-+     * (armIngressSeq) when the guest proxy is present, else by physical vblank
-+     * callback count (armCbSeq vs vblankCbSeq); see nvidia-drm-modeset.c.
++     * completed once NV_DRM_FLIP_VBLANK_QUALIFY (=2) physical vblank callbacks
++     * have been observed since it was armed -- a scanout-latch margin coherent
++     * with scanout, so no tearing (at the cost of throughput, ~30Hz).
 +     *
 +     * All fields here are protected by drm_device::event_lock. generation is
-+     * bumped by nv_drm_flip_vblank_invalidate() on teardown to invalidate
-+     * in-flight arms (a reaped arm must match the current generation); wiring
-+     * it into per-modeset invalidation is a follow-up. A per-head qualification
-+     * vblank reference (drm_crtc_vblank_get) is acquired for active crtcs
-+     * before any arm is published and held until the head's flips complete;
-+     * it is separate from the existing per-flip event reference.
++     * bumped by nv_drm_flip_vblank_invalidate() on teardown AND by
++     * nv_drm_flip_vblank_reset_on_modeset() on every modeset, invalidating any
++     * in-flight arm (a reaped arm must match the current generation). A
++     * per-head qualification vblank reference (drm_crtc_vblank_get) is
++     * acquired for active crtcs before any arm is published and held until
++     * the head's flips complete; it is separate from the existing per-flip
++     * event reference.
 +     */
 +    struct {
 +        NvBool armed;
-+        NvU32 armIngressSeq;    /* DCE doorbell ingress seq snapshot at arm */
++        NvU32 armCbSeq;         /* vblankCbSeq[head] snapshot at arm */
 +        NvU32 generation;
 +    } flipVblank[NVKMS_KAPI_MAX_HEADS][NVKMS_KAPI_LAYER_MAX];
++    NvU32 vblankCbSeq[NVKMS_KAPI_MAX_HEADS];  /* physical vblank callbacks/head */
 +    NvBool flipVblankRefHeld[NVKMS_KAPI_MAX_HEADS];
 +    NvU32 flipVblankGeneration;
 +    atomic_t flipVblankEnabled;
@@ -39,7 +40,7 @@
  #if defined(NV_DRM_FENCE_AVAILABLE)
 --- a/nvdisplay/kernel-open/nvidia-drm/nvidia-drm-modeset.h
 +++ b/nvdisplay/kernel-open/nvidia-drm/nvidia-drm-modeset.h
-@@ -44,6 +44,13 @@
+@@ -44,6 +44,15 @@
  
  void nv_drm_handle_flip_event(struct nv_drm_device *nv_dev, NvU32 head, NvU32 layer, bool process_pending);
  
@@ -49,6 +50,8 @@
 +void nv_drm_flip_vblank_invalidate(struct nv_drm_device *nv_dev);
 +void nv_drm_flip_vblank_on_callback(struct nv_drm_device *nv_dev,
 +                                    struct nv_drm_crtc *nv_crtc);
++void nv_drm_flip_vblank_reset_on_modeset(struct nv_drm_device *nv_dev,
++                                         struct nv_drm_crtc *nv_crtc);
 +
  int nv_drm_shut_down_all_crtcs(struct drm_device *dev);
  
@@ -66,48 +69,31 @@
  struct nv_drm_atomic_state {
      struct NvKmsKapiRequestedModeSetConfig config;
      struct drm_atomic_state base;
-@@ -509,6 +513,278 @@
+@@ -509,6 +513,297 @@
      wake_up(&nv_dev->flip_event_wq);
  }
  
 +/*
-+ * dce passthrough: complete a committed flip once a post-kickoff vblank has
-+ * been observed, so the new buffer has latched and the old buffer is free
-+ * before userspace may reuse it (reuse-while-scanned is the tearing cause).
-+ * See the flipVblank comment in nvidia-drm-priv.h.
++ * dce passthrough: complete a committed flip once NV_DRM_FLIP_VBLANK_QUALIFY
++ * physical vblank callbacks have been observed since it was armed, so the new
++ * buffer has latched and the old buffer is free before userspace may reuse it
++ * (reuse-while-scanned is the tearing cause). See the flipVblank comment in
++ * nvidia-drm-priv.h.
 + *
-+ * Two qualification modes, chosen at runtime:
-+ *
-+ * 1. Ingress-sequence (preferred, 60Hz): the DCE reverse-doorbell stamps a
-+ *    monotonic ingress sequence on every relayed event before it enters
-+ *    RM/NVKMS (tegra_dce_get_ingress_seq, weak -- present only with the guest
-+ *    proxy). A flip is armed with the ingress seq snapshotted just after
-+ *    submission; it completes on the first vblank callback seen after the
-+ *    ingress seq has advanced -- i.e. triggered by an event ingested AFTER the
-+ *    kickoff. The single-slot ACK-after-injection relay means at most one stale
-+ *    pre-kickoff vblank event can be blocked behind the commit lock; its
-+ *    ingress seq is <= the snapshot, so it is rejected precisely, letting the
-+ *    real post-kickoff vblank complete the flip at 60Hz.
-+ *
-+ * 2. Callback-count fallback (QUALIFY_CBS, ~30Hz): when the ingress stamp is
-+ *    unavailable, count physical vblank CALLBACKS (vblankCbSeq -- NOT the DRM
-+ *    vblank counter, which the deferred callback increments under nvkms_lock
-+ *    and so reflects callback-processing order). Requiring 2 callbacks after
-+ *    arming tolerates a late-kickoff latch but caps throughput near 30Hz.
++ * Qualification counts physical vblank CALLBACKS (vblankCbSeq -- NOT the DRM
++ * vblank counter, which the deferred callback increments under nvkms_lock and
++ * so reflects callback-processing order, not physical vblank count). Requiring
++ * NV_DRM_FLIP_VBLANK_QUALIFY callbacks after arming tolerates a late-kickoff
++ * scanout latch (the R5/window-channel completion signal is not usable as a
++ * per-flip contract under passthrough) at the cost of throughput (~30Hz).
 + *
 + * The completion handler runs from an NVKMS timer under nvkms_lock; it takes
 + * only event_lock and calls no NVKMS/KAPI path, so it cannot invert the commit
 + * lock order.
 + */
 +
-+/*
-+ * DCE guest-proxy ingress sequence (tegra-dce). This gpu-vm passthrough build
-+ * always loads tegra-dce before nvidia-drm, so a direct dependency is fine --
-+ * and a weak declaration here emits an R_AARCH64_ADR_GOT_PAGE relocation the
-+ * module loader rejects ("unsupported RELA relocation: 311"), which prevents
-+ * nvidia-drm from loading at all.
-+ */
-+extern u32 tegra_dce_get_ingress_seq(void);
++/* Physical vblank callbacks required after arming before a flip completes. */
++#define NV_DRM_FLIP_VBLANK_QUALIFY 2
 +
 +void nv_drm_flip_vblank_init(struct nv_drm_device *nv_dev)
 +{
@@ -115,6 +101,7 @@
 +
 +    for (h = 0; h < NVKMS_KAPI_MAX_HEADS; h++) {
 +        nv_dev->flipVblankRefHeld[h] = NV_FALSE;
++        nv_dev->vblankCbSeq[h] = 0;
 +        for (l = 0; l < NVKMS_KAPI_LAYER_MAX; l++) {
 +            nv_dev->flipVblank[h][l].armed = NV_FALSE;
 +        }
@@ -182,28 +169,26 @@
 +        return;
 +    }
 +
-+    /* Ingress stamp: a plain atomic read, outside the lock. */
-+    {
-+    const NvU32 ingressNow = tegra_dce_get_ingress_seq();
-+
 +    spin_lock_irqsave(&dev->event_lock, flags);
 +    {
 +        NvBool anyRemain = NV_FALSE;
++
++        nv_dev->vblankCbSeq[head]++;
 +
 +        for (layer = 0; layer < NVKMS_KAPI_LAYER_MAX; layer++) {
 +            if (!nv_dev->flipVblank[head][layer].armed) {
 +                continue;
 +            }
 +            /*
-+             * A doorbell event was ingested after this flip was armed, so this
-+             * vblank was triggered by a post-kickoff event. The single-slot
-+             * relay allows at most one stale pre-kickoff event, whose ingress
-+             * seq equals the snapshot -- rejected here.
++             * Completes once NV_DRM_FLIP_VBLANK_QUALIFY physical vblank
++             * callbacks have been observed since this flip was armed
++             * (unsigned subtraction handles vblankCbSeq wrap).
 +             */
 +            if ((nv_dev->flipVblank[head][layer].generation ==
 +                 nv_dev->flipVblankGeneration) &&
-+                (ingressNow !=
-+                 nv_dev->flipVblank[head][layer].armIngressSeq)) {
++                ((nv_dev->vblankCbSeq[head] -
++                  nv_dev->flipVblank[head][layer].armCbSeq) >=
++                 NV_DRM_FLIP_VBLANK_QUALIFY)) {
 +                nv_dev->flipVblank[head][layer].armed = NV_FALSE;
 +                doneLayers[nDone++] = layer;
 +            } else {
@@ -223,7 +208,6 @@
 +    }
 +    if (putRef) {
 +        drm_crtc_vblank_put(&nv_crtc->base);
-+    }
 +    }
 +}
 +
@@ -293,8 +277,8 @@
 +    if (atomic_read(&nv_dev->flipVblankEnabled) &&
 +        nv_dev->flipVblankRefHeld[head]) {
 +        nv_dev->flipVblank[head][layer].armed = NV_TRUE;
-+        nv_dev->flipVblank[head][layer].armIngressSeq =
-+            tegra_dce_get_ingress_seq();
++        nv_dev->flipVblank[head][layer].armCbSeq =
++            nv_dev->vblankCbSeq[head];
 +        nv_dev->flipVblank[head][layer].generation =
 +            nv_dev->flipVblankGeneration;
 +        armed = NV_TRUE;
@@ -302,6 +286,44 @@
 +    spin_unlock_irqrestore(&dev->event_lock, flags);
 +
 +    return armed;
++}
++
++/*
++ * Invalidate all in-flight arms across every head on a modeset (bumping the
++ * shared generation), and drop this crtc's qualification vblank reference if
++ * held. A modeset changes the vblank timing contract for the crtcs involved,
++ * so any arm snapshotted against the old vblankCbSeq sequence is stale;
++ * invalidating every head (not just the one being modeset) is intentional and
++ * safe -- a modeset is rare, and a stray extra vblank wait on an unrelated
++ * head is harmless.
++ */
++void nv_drm_flip_vblank_reset_on_modeset(struct nv_drm_device *nv_dev,
++                                         struct nv_drm_crtc *nv_crtc)
++{
++    struct drm_device *dev = nv_crtc->base.dev;
++    const NvU32 head = nv_crtc->head;
++    NvBool putRef = NV_FALSE;
++    unsigned long flags;
++    NvU32 layer;
++
++    if (head >= NVKMS_KAPI_MAX_HEADS) {
++        return;
++    }
++
++    spin_lock_irqsave(&dev->event_lock, flags);
++    nv_dev->flipVblankGeneration++;
++    for (layer = 0; layer < NVKMS_KAPI_LAYER_MAX; layer++) {
++        nv_dev->flipVblank[head][layer].armed = NV_FALSE;
++    }
++    if (nv_dev->flipVblankRefHeld[head]) {
++        nv_dev->flipVblankRefHeld[head] = NV_FALSE;
++        putRef = NV_TRUE;
++    }
++    spin_unlock_irqrestore(&dev->event_lock, flags);
++
++    if (putRef) {
++        drm_crtc_vblank_put(&nv_crtc->base);
++    }
 +}
 +
 +/* True if the crtc has any plane with a pending flip in its flip_list. */
@@ -345,7 +367,7 @@
  int nv_drm_atomic_commit(struct drm_device *dev,
                           struct drm_atomic_state *state,
                           bool nonblock)
-@@ -626,6 +902,64 @@
+@@ -626,6 +921,74 @@
                                   nv_plane->layer_idx, false);
      }
  
@@ -364,6 +386,16 @@
 +     */
 +    if (atomic_read(&nv_dev->flipVblankEnabled)) {
 +        NvBool tookAnyRef = NV_FALSE;
++
++        /*
++         * A modeset changes vblank timing, so invalidate any in-flight arm
++         * before arming new ones this commit.
++         */
++        nv_drm_for_each_crtc_in_state(state, crtc, crtc_state, i) {
++            if (drm_atomic_crtc_needs_modeset(crtc_state)) {
++                nv_drm_flip_vblank_reset_on_modeset(nv_dev, to_nv_crtc(crtc));
++            }
++        }
 +
 +        nv_drm_for_each_crtc_in_state(state, crtc, crtc_state, i) {
 +            struct nv_drm_crtc *nv_crtc = to_nv_crtc(crtc);
