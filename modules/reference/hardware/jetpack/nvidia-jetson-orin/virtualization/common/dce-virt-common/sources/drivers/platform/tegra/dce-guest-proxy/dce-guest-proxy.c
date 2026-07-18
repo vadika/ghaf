@@ -210,11 +210,10 @@ static int dce_guest_proxy_probe(struct platform_device *pdev)
 
 	dev_info(&pdev->dev, "dce-virtual-pa: 0x%llX -> %p\n", vpa, mem_iova);
 
-	/* Route every guest DCE client send through the shared window. */
-	tegra_dce_ipc_send_redirect = my_dce_ipc_send;
-
 	/* Ordered worker for the no-drop event FIFO -- must be up before the
-	 * poll thread starts injecting into it. */
+	 * poll thread starts injecting into it. Bring it up BEFORE publishing
+	 * the send redirect, so a start failure cannot leave a dangling
+	 * tegra_dce_ipc_send_redirect pointing into the unmapped window. */
 	ret = tegra_dce_virt_event_start();
 	if (ret) {
 		dev_err(&pdev->dev, "virt-event wq start failed: %d\n", ret);
@@ -228,6 +227,10 @@ static int dce_guest_proxy_probe(struct platform_device *pdev)
 	debugfs_create_atomic_t("full",      0444, dce_virt_dbg, tegra_dce_virt_counter(1));
 	debugfs_create_atomic_t("delivered", 0444, dce_virt_dbg, tegra_dce_virt_counter(2));
 	debugfs_create_atomic_t("noclient",  0444, dce_virt_dbg, tegra_dce_virt_counter(3));
+
+	/* Route every guest DCE client send through the shared window -- only
+	 * now that the FIFO worker is live and cannot fail this probe. */
+	tegra_dce_ipc_send_redirect = my_dce_ipc_send;
 
 	/* Start draining the reverse window (async DCE notifications). */
 	dce_evt_task = kthread_run(dce_evt_poll_fn, NULL, "dce-evt-poll");
