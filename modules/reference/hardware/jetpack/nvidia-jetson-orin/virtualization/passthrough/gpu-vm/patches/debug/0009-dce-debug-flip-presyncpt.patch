@@ -1,0 +1,28 @@
+DIAGNOSTIC ONLY (gpuvmDceDebug): log the per-flip pre-syncpt at the top of
+EvoFlipC3Common, to test whether the freeze is an unsatisfied acquire
+pre-syncpoint (the window channel begins the flip -- notifier BEGUN -- but
+never latches because it waits on a host1x syncpt that never reaches
+threshold, so no FINISHED and no R5 completion event). Prints usingSyncpt,
+isPreSyncptSpecified, the pre-syncpt id and its threshold value per flip;
+correlate the id/value against the guest host1x live syncpt minimum.
+
+--- a/nvdisplay/src/nvidia-modeset/src/nvkms-evo3.c
++++ b/nvdisplay/src/nvidia-modeset/src/nvkms-evo3.c
+@@ -4286,7 +4286,17 @@
+     NvU32 offset, ctrlVal;
+
+     nvUpdateUpdateState(pDevEvo, updateState, pChannel);
++
++    nvEvoLog(EVO_LOG_ERROR,
++        "[gpuvm-dbg] flip-sync: head=%u usingSyncpt=%d preSpec=%d preSyncpt=%u preValue=%u",
++        head, pHwState->syncObject.usingSyncpt,
++        pHwState->syncObject.usingSyncpt ?
++            pHwState->syncObject.u.syncpts.isPreSyncptSpecified : 0,
++        pHwState->syncObject.usingSyncpt ?
++            pHwState->syncObject.u.syncpts.preSyncpt : 0,
++        pHwState->syncObject.usingSyncpt ?
++            pHwState->syncObject.u.syncpts.preValue : 0);
+
+     /* program notifier */
+
+     if (pHwState->completionNotifier.surface.pSurfaceEvo == NULL) {

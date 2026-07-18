@@ -548,6 +548,10 @@ in
                       # ISO-surface gate) -- to catch a pending flip that
                       # never gets its R5 awaken.
                       ./patches/debug/0008-dce-debug-flip-awaken-contract.patch
+                      # Per-flip pre-syncpt probe: usingSyncpt + pre-syncpt id/
+                      # threshold, to test the unsatisfied-acquire-syncpt freeze
+                      # (window channel BEGUN but never latched -> no FINISHED).
+                      ./patches/debug/0009-dce-debug-flip-presyncpt.patch
                     ];
                   # DCE display proxy (guest side): redirect the guest's DCE IPC
                   # through the shared MMIO window and skip the R5 bootstrap (the
