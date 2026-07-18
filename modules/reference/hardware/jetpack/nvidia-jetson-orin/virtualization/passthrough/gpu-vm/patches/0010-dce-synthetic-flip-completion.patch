@@ -1,18 +1,32 @@
---- a/nvdisplay/src/nvidia-modeset/src/nvkms-evo.c
-+++ b/nvdisplay/src/nvidia-modeset/src/nvkms-evo.c
-@@ -4292,11 +4292,23 @@
+diff -ruN a/nvdisplay/src/nvidia-modeset/include/nvkms-evo.h b/nvdisplay/src/nvidia-modeset/include/nvkms-evo.h
+--- a/nvdisplay/src/nvidia-modeset/include/nvkms-evo.h	2026-07-18 16:13:22.037392545 +0300
++++ b/nvdisplay/src/nvidia-modeset/include/nvkms-evo.h	2026-07-18 16:24:41.329910654 +0300
+@@ -360,6 +360,7 @@
+                                                  const NVEvoModesetUpdateState
+                                                      *pModesetUpdate);
+ 
++void nvDceScheduleSyntheticFlipOccurred(NVEvoChannelPtr pChannel);
+ NvU32 nvEvoRegisterVBlankEvent(NVDispEvoRec *pDispEvo,
+                                const NvU32 head,
+                                NVVBlankIntrCallbackRec *cbRec);
+diff -ruN a/nvdisplay/src/nvidia-modeset/src/nvkms-evo.c b/nvdisplay/src/nvidia-modeset/src/nvkms-evo.c
+--- a/nvdisplay/src/nvidia-modeset/src/nvkms-evo.c	2026-07-18 16:13:22.038532452 +0300
++++ b/nvdisplay/src/nvidia-modeset/src/nvkms-evo.c	2026-07-18 16:24:35.245935258 +0300
+@@ -4292,11 +4292,25 @@
  static void CompletionNotifierEvent(void *arg, void *pEventDataVoid,
                                      NvU32 hEvent, NvU32 Data, NV_STATUS Status)
  {
 +  /* dce: the host DCE R5 posts this flip-completion event ~130ms after
 +   * the kickoff, capping flips at ~8-10fps. Drop it; deliver the
-+   * completion from nvDceScheduleSyntheticFlipOccurred() one frame after
-+   * kickoff instead. */
++   * completion from nvDceScheduleSyntheticFlipOccurred() instead. */
 +  (void) arg;
 +}
 +
 +void nvDceScheduleSyntheticFlipOccurred(NVEvoChannelPtr pChannel)
 +{
++  /* Caller schedules this for the primary (main) layer only: the overlay
++   * layer carries no framebuffer in this passthrough and completing it
++   * triggers WARN_ON(process_pending) in nvidia-drm (the layer-1 flood). */
 +  if (pChannel == NULL || pChannel->completionNotifierEventRefPtr == NULL) {
 +      return;
 +  }
@@ -24,28 +38,23 @@
 +        CompletionNotifierEventDeferredWork,
 +        (struct nvkms_ref_ptr *) pChannel->completionNotifierEventRefPtr,
 +        0,
-+        11000 /* usec: best real-present floor; R5/relay jitter caps ~40-45Hz */);
++        11000 /* usec: HZ=250 truncates to 2 jiffies (~4-8ms) */);
  }
  
  void nvEvoPreModesetRegisterFlipOccurredEvent(NVDispEvoRec *pDispEvo,
---- a/nvdisplay/src/nvidia-modeset/src/nvkms-hw-flip.c
-+++ b/nvdisplay/src/nvidia-modeset/src/nvkms-hw-flip.c
-@@ -1709,6 +1709,8 @@
+diff -ruN a/nvdisplay/src/nvidia-modeset/src/nvkms-hw-flip.c b/nvdisplay/src/nvidia-modeset/src/nvkms-hw-flip.c
+--- a/nvdisplay/src/nvidia-modeset/src/nvkms-hw-flip.c	2026-07-18 16:13:22.038955013 +0300
++++ b/nvdisplay/src/nvidia-modeset/src/nvkms-hw-flip.c	2026-07-18 16:24:50.529873473 +0300
+@@ -1709,6 +1709,12 @@
                             &pFlipState->layer[layer],
                             updateState,
                             bypassComposition);
-+        /* dce synthetic flip completion (see nvkms-evo.c) */
-+        nvDceScheduleSyntheticFlipOccurred(pDevEvo->head[head].layer[layer]);
++        /* dce synthetic flip completion (see nvkms-evo.c): primary plane
++         * only -- the overlay layer has no framebuffer here and completing
++         * it triggers WARN_ON(process_pending) in nvidia-drm. */
++        if (layer == NVKMS_MAIN_LAYER) {
++            nvDceScheduleSyntheticFlipOccurred(pDevEvo->head[head].layer[layer]);
++        }
          if (layer == NVKMS_MAIN_LAYER && allowFlipLock) {
              UpdateUpdateFlipLockState(pDevEvo, updateState,
                                        pDevEvo->head[head].layer[layer]);
---- a/nvdisplay/src/nvidia-modeset/include/nvkms-evo.h
-+++ b/nvdisplay/src/nvidia-modeset/include/nvkms-evo.h
-@@ -360,6 +360,7 @@
-                                                  const NVEvoModesetUpdateState
-                                                      *pModesetUpdate);
- 
-+void nvDceScheduleSyntheticFlipOccurred(NVEvoChannelPtr pChannel);
- NvU32 nvEvoRegisterVBlankEvent(NVDispEvoRec *pDispEvo,
-                                const NvU32 head,
-                                NVVBlankIntrCallbackRec *cbRec);
