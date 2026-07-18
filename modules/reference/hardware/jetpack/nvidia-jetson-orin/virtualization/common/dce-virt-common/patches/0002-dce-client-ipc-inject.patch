@@ -22,7 +22,7 @@ injector is never called there).
 diff --git a/drivers/platform/tegra/dce/dce-client-ipc.c b/drivers/platform/tegra/dce/dce-client-ipc.c
 --- a/drivers/platform/tegra/dce/dce-client-ipc.c	2026-07-15 17:02:41.583943334 +0300
 +++ b/drivers/platform/tegra/dce/dce-client-ipc.c	2026-07-18 00:00:00.000000000 +0300
-@@ -211,6 +211,157 @@
+@@ -211,6 +211,159 @@
  }
  EXPORT_SYMBOL(tegra_dce_unregister_ipc_client);
  
@@ -135,10 +135,12 @@ diff --git a/drivers/platform/tegra/dce/dce-client-ipc.c b/drivers/platform/tegr
 +	       % DCE_VIRT_FIFO_DEPTH;
 +	if (used > dce_virt_hiwater)
 +		dce_virt_hiwater = used;
-+	spin_unlock_irqrestore(&dce_virt_fifo_lock, flags);
-+
++	/* queue under the lock: stopping is false here and _stop() sets it
++	 * under this same lock before destroying dce_virt_wq, so the handle
++	 * cannot be freed nor this entry orphaned by a concurrent teardown. */
 +	atomic_inc(&dce_virt_enqueued);
 +	queue_work(dce_virt_wq, &dce_virt_work);
++	spin_unlock_irqrestore(&dce_virt_fifo_lock, flags);
 +	return 0;
 +}
 +EXPORT_SYMBOL(tegra_dce_client_ipc_inject);
