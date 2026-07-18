@@ -513,33 +513,18 @@ in
                       # the SOR is never assigned (dark until manual replug).
                       # Schedule the same deferred hotplug work once at init.
                       ./patches/0020-synthesize-boot-hotplug-long-pulse.patch
-                      # Trace-and-drop the host DCE R5's flip-completion event
-                      # (handoff Blocker 1): 0011 below re-enables WRITE_AWAKEN
-                      # on the active-primary window notifier so the R5 now
-                      # generates a real per-flip completion; this patch logs
-                      # its hEvent/Data/Status and still drops it -- the
-                      # two-vblank path (0013) is what completes DRM this
-                      # stage, so delivering the R5 event too would
-                      # double-complete. Removed entirely in Phase C, when the
-                      # R5 event becomes the real completion source.
-                      ./patches/0010-dce-drop-r5-completion-event.patch
                       # Window-channel completion notifier: restore
-                      # WRITE_AWAKEN, but only for an active window with a
-                      # committed surface (pSurfaceEvo[NVKMS_LEFT] != NULL) --
-                      # an inactive overlay notifier must never raise a second
-                      # R5 abort source. This is what makes 0010's R5 event
-                      # real; 0013 still owns DRM completion this stage.
+                      # WRITE_AWAKEN for an active-primary window only
+                      # (pSurfaceEvo[NVKMS_LEFT] != NULL) -- generates the real
+                      # per-flip R5 completion (measured 60/s, no abort).
+                      # Phase C trial (2026-07-18): the R5 event IS now the DRM
+                      # completion source -- 0010 (trace-drop) and 0013 (vblank
+                      # completion) are OUT of the list, so the native
+                      # CompletionNotifierEvent -> NVKMS -> KAPI -> nvidia-drm
+                      # chain delivers each flip. Testing whether native R5
+                      # completion alone gives tear-free 60fps before investing
+                      # in Blocker 2's ACK-decouple FIFO.
                       ./patches/0011-window-notifier-plain-write.patch
-                      # DRM-side flip completion via vblank qualification: the
-                      # completion notifier is not a usable per-flip signal in
-                      # passthrough (the current flip's notifier reaches BEGUN
-                      # but never FINISHED in the guest window). Instead complete
-                      # each committed flip on the first vblank after submission
-                      # -- the scanout latch point (coherent with scanout, so no
-                      # tearing) -- delivered lock-free from the vblank callback
-                      # with a kickoff-sequence generation guard. Replaces the
-                      # fixed-delay synthetic timer that tore.
-                      ./patches/0013-drm-vblank-flip-completion.patch
                     ]
                     # dce-dbg bring-up instrumentation (ctxdma/pushbuffer/instmem
                     # FE-arming params, DISPRM RPC + payload hexdumps, core PB
