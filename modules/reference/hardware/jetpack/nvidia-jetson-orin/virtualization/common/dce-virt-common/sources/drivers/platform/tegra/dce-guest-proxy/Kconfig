@@ -1,0 +1,9 @@
+# SPDX-License-Identifier: GPL-2.0-only
+config TEGRA_DCE_GUEST_PROXY
+	bool "Tegra DCE guest proxy support"
+	help
+	  Redirects the guest DCE driver's client IPC through a shared MMIO
+	  window to a QEMU bridge, which relays it to the real, host-owned DCE.
+
+	  Say Y here to enable this driver and to compile this driver as a
+	  module, choose M here. If unsure, say N

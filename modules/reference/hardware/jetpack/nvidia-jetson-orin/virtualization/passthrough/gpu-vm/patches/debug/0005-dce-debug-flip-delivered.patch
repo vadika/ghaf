@@ -1,0 +1,11 @@
+--- a/nvdisplay/src/nvidia-modeset/src/nvkms.c
++++ b/nvdisplay/src/nvidia-modeset/src/nvkms.c
+@@ -5336,6 +5336,8 @@
+         event.u.flipOccurred.head = apiHead;
+         event.u.flipOccurred.layer = layer;
+ 
++        nvEvoLog(EVO_LOG_ERROR, "dce-dbg FLIPOCC delivered pOpen=%p head=%u layer=%u",
++                 pOpen, apiHead, layer);
+         SendEvent(pOpen, &event);
+     }
+ }

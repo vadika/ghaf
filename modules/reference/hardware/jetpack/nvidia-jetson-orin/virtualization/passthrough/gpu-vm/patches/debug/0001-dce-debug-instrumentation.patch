@@ -1,0 +1,326 @@
+From: Ghaf contributors <ghaf@tii.ae>
+Subject: [PATCH] dce passthrough: debug instrumentation (toggleable)
+
+All dce-dbg diagnostics used to bring up display passthrough, applied on
+top of the functional set. Toggle via gpuvmDceDebug in gpu-vm/default.nix.
+Covers: ctxdma/instmem/pushbuffer FE-arming parameters, notifier ctxdma
+programming, DISPRM RPC alloc/ctrl/payload hexdumps, core pushbuffer
+dumps, DP attach/long-pulse state, SOR assignment, RG status on lost
+notifications.
+---
+diff --git a/nvdisplay/src/nvidia-modeset/src/dp/nvdp-connector.cpp b/nvdisplay/src/nvidia-modeset/src/dp/nvdp-connector.cpp
+index cc1055e..3c5d195 100644
+--- a/nvdisplay/src/nvidia-modeset/src/dp/nvdp-connector.cpp
++++ b/nvdisplay/src/nvidia-modeset/src/dp/nvdp-connector.cpp
+@@ -106,6 +106,10 @@ void nvDPNotifyLongPulse(NVConnectorEvoPtr pConnectorEvo,
+     NVDPLibConnectorPtr pNVDpLibConnector = pConnectorEvo->pDpLibConnector;
+     DisplayPort::Connector *c = pNVDpLibConnector->connector;
+ 
++    nvEvoLogDisp(pConnectorEvo->pDispEvo, EVO_LOG_ERROR,
++                 "dce-dbg DP LONGPULSE connector=0x%08x connected=%d",
++                 nvDpyIdToNvU32(pConnectorEvo->displayId), connected);
++
+     pNVDpLibConnector->plugged = connected;
+ 
+     if (connected && !nvAssignSOREvo(pConnectorEvo->pDispEvo,
+@@ -115,6 +119,11 @@ void nvDPNotifyLongPulse(NVConnectorEvoPtr pConnectorEvo,
+         // DPLib takes care of skipping LT on unassigned SOR Display. 
+     }
+ 
++    nvEvoLogDisp(pConnectorEvo->pDispEvo, EVO_LOG_ERROR,
++                 "dce-dbg LONGPULSE-post connected=%d or.primary=%u plugged=%d",
++                 connected, pConnectorEvo->or.primary,
++                 pNVDpLibConnector->plugged);
++
+     c->notifyLongPulse(connected);
+ 
+ }
+@@ -591,6 +600,12 @@ void NotifyAttachBegin(NVDPLibConnectorPtr pDpLibConnector,
+     /* Insert active dpys into group */
+     pDpLibConnector->dpyIdList[head] = pDpLibModesetState->dpyIdList;
+     FOR_ALL_EVO_DPYS(pDpyEvo, pDpLibConnector->dpyIdList[head], pDispEvo) {
++        /* dce-dbg (5.4): a NULL pDpLibDevice silently attaches an EMPTY
++         * group -- the DP lib then never trains the link for the modeset. */
++        nvEvoLogDisp(pDispEvo, EVO_LOG_ERROR,
++                     "dce-dbg DP ATTACH head=%u dpy=0x%08x dev=%s",
++                     head, nvDpyIdToNvU32(pDpyEvo->id),
++                     pDpyEvo->dp.pDpLibDevice ? "present" : "NULL");
+         if (pDpyEvo->dp.pDpLibDevice) {
+             pDpLibConnector->pGroup[head]->insert(
+                     pDpyEvo->dp.pDpLibDevice->device);
+diff --git a/nvdisplay/src/nvidia-modeset/src/nvkms-dma.c b/nvdisplay/src/nvidia-modeset/src/nvkms-dma.c
+index 4438fd0..444123e 100644
+--- a/nvdisplay/src/nvidia-modeset/src/nvkms-dma.c
++++ b/nvdisplay/src/nvidia-modeset/src/nvkms-dma.c
+@@ -28,6 +28,7 @@
+ #include "nvkms-rmapi.h"
+ #include "class/cl917d.h" // NV917DDispControlDma, NV917D_DMA_*
+ #include <ctrl/ctrl0080/ctrl0080dma.h> // NV0080_CTRL_CMD_DMA_FLUSH
++#include <ctrl/ctrl5070/ctrl5070rg.h>  // dce-dbg: GET_RG_STATUS/SCAN_LINE
+ #include "nvos.h"
+ 
+ #define NV_DMA_PUSHER_CHASE_PAD 5
+@@ -35,6 +36,23 @@
+ 
+ static void EvoCoreKickoff(NVDmaBufferEvoPtr push_buffer, NvU32 putOffset);
+ 
++/* dce-dbg: dump the method words in [start, end) word indices (5.6) */
++static void DceDbgDumpPb(NVDmaBufferEvoPtr p, NvU32 chMask,
++                         NvU32 start, NvU32 end)
++{
++    NvU32 i;
++
++    for (i = start; i < end; i += 4) {
++        nvEvoLogDev(p->pDevEvo, EVO_LOG_ERROR,
++                    "dce-dbg PB ch=%08x %04x: %08x %08x %08x %08x",
++                    chMask, i * 4,
++                    p->base[i],
++                    (i + 1 < end) ? p->base[i + 1] : 0xffffffff,
++                    (i + 2 < end) ? p->base[i + 2] : 0xffffffff,
++                    (i + 3 < end) ? p->base[i + 3] : 0xffffffff);
++    }
++}
++
+ void nvDmaKickoffEvo(NVEvoChannelPtr pChannel)
+ {
+     NVDmaBufferEvoPtr p = &pChannel->pb;
+@@ -44,6 +62,19 @@ void nvDmaKickoffEvo(NVEvoChannelPtr pChannel)
+         return;
+     }
+ 
++    /* dce-dbg: log the methods being kicked off before PUT is written */
++    {
++        NvU32 start = p->put_offset / sizeof(NvU32);
++        NvU32 end = putOffset / sizeof(NvU32);
++
++        if (end < start) { /* wrapped: high part first, then from 0 */
++            DceDbgDumpPb(p, pChannel->channelMask, start,
++                         p->offset_max / sizeof(NvU32));
++            start = 0;
++        }
++        DceDbgDumpPb(p, pChannel->channelMask, start, end);
++    }
++
+     EvoCoreKickoff(p, putOffset);
+ }
+ 
+@@ -315,6 +346,35 @@ static NvBool EvoCheckNotifier(const NVDispEvoRec *pDispEvo,
+             nvEvoLogDisp(pDispEvo, EVO_LOG_WARN,
+                          "Lost display notification (%d:0x%08x); "
+                          "continuing.", sd, val);
++            /* dce-dbg: is the raster generator actually running? */
++            {
++                NV5070_CTRL_CMD_GET_RG_STATUS_PARAMS rg = { };
++                NV5070_CTRL_CMD_GET_RG_SCAN_LINE_PARAMS sl1 = { };
++                NV5070_CTRL_CMD_GET_RG_SCAN_LINE_PARAMS sl2 = { };
++                NvU32 r1, r2, r3;
++                int i;
++
++                rg.base.subdeviceIndex = sd;
++                sl1.base.subdeviceIndex = sd;
++                sl2.base.subdeviceIndex = sd;
++                r1 = nvRmApiControl(nvEvoGlobal.clientHandle,
++                                    pDispEvo->pDevEvo->displayHandle,
++                                    NV5070_CTRL_CMD_GET_RG_STATUS,
++                                    &rg, sizeof(rg));
++                r2 = nvRmApiControl(nvEvoGlobal.clientHandle,
++                                    pDispEvo->pDevEvo->displayHandle,
++                                    NV5070_CTRL_CMD_GET_RG_SCAN_LINE,
++                                    &sl1, sizeof(sl1));
++                for (i = 0; i < 500; i++) nvkms_yield();
++                r3 = nvRmApiControl(nvEvoGlobal.clientHandle,
++                                    pDispEvo->pDevEvo->displayHandle,
++                                    NV5070_CTRL_CMD_GET_RG_SCAN_LINE,
++                                    &sl2, sizeof(sl2));
++                nvEvoLogDisp(pDispEvo, EVO_LOG_ERROR,
++                             "dce-dbg RG h0 stat=0x%x stalled=%u scan=%u->%u vbl=%u/%u rets=0x%x/0x%x",
++                             r1, rg.rgStalled, sl1.scanLine, sl2.scanLine,
++                             sl1.inVblank, sl2.inVblank, r2, r3);
++            }
+             EvoWriteNotifier(pNotifier, done_value << done_base_bit);
+             return TRUE;
+         }
+diff --git a/nvdisplay/src/nvidia-modeset/src/nvkms-evo.c b/nvdisplay/src/nvidia-modeset/src/nvkms-evo.c
+index 7d3edef..ab66ed3 100644
+--- a/nvdisplay/src/nvidia-modeset/src/nvkms-evo.c
++++ b/nvdisplay/src/nvidia-modeset/src/nvkms-evo.c
+@@ -4796,6 +4796,7 @@ NvBool nvAssignSOREvo(const NVDispEvoRec *pDispEvo, const NvU32 displayId,
+ 
+     if (!NV0073_CTRL_SYSTEM_GET_CAP(pDevEvo->commonCapsBits,
+                 NV0073_CTRL_SYSTEM_CAPS_CROSS_BAR_SUPPORTED)) {
++        nvEvoLog(EVO_LOG_ERROR, "dce-dbg ASSIGN_SOR skipped: no crossbar cap");
+         return TRUE;
+     }
+ 
+@@ -4811,10 +4812,15 @@ NvBool nvAssignSOREvo(const NVDispEvoRec *pDispEvo, const NvU32 displayId,
+                          sizeof(params));
+ 
+     if (ret != NVOS_STATUS_SUCCESS) {
++        nvEvoLog(EVO_LOG_ERROR, "dce-dbg ASSIGN_SOR dpyId=0x%08x FAILED ret=0x%x",
++                 displayId, ret);
+         return FALSE;
+     }
+ 
+     RefreshSORAssignments(pDispEvo, &params);
++    nvEvoLog(EVO_LOG_ERROR, "dce-dbg ASSIGN_SOR dpyId=0x%08x ok list[0..3]=%x/%x/%x/%x",
++             displayId, params.sorAssignList[0], params.sorAssignList[1],
++             params.sorAssignList[2], params.sorAssignList[3]);
+ 
+     return TRUE;
+ }
+diff --git a/nvdisplay/src/nvidia-modeset/src/nvkms-evo3.c b/nvdisplay/src/nvidia-modeset/src/nvkms-evo3.c
+index dec6c95..1386eb1 100644
+--- a/nvdisplay/src/nvidia-modeset/src/nvkms-evo3.c
++++ b/nvdisplay/src/nvidia-modeset/src/nvkms-evo3.c
+@@ -3200,6 +3200,10 @@ static void SetCoreNotifierSurfaceAddressAndControl(
+ {
+     NvU32 ctxDmaHandle = pSurfaceDesc ? pSurfaceDesc->ctxDmaHandle : 0;
+ 
++    nvEvoLog(EVO_LOG_ERROR,
++                "dce-dbg NOTIFIER hCtxDma=0x%08x offset=%u",
++                ctxDmaHandle, offset);
++
+     nvDmaSetStartEvoMethod(pChannel, NVC37D_SET_CONTEXT_DMA_NOTIFIER, 1);
+     nvDmaSetEvoMethodData(pChannel,
+         DRF_NUM(C37D, _SET_CONTEXT_DMA_NOTIFIER, _HANDLE, ctxDmaHandle));
+diff --git a/nvdisplay/src/nvidia/src/kernel/gpu/dce_client/dce_client_rpc.c b/nvdisplay/src/nvidia/src/kernel/gpu/dce_client/dce_client_rpc.c
+index 1b7c03f..8a75636 100644
+--- a/nvdisplay/src/nvidia/src/kernel/gpu/dce_client/dce_client_rpc.c
++++ b/nvdisplay/src/nvidia/src/kernel/gpu/dce_client/dce_client_rpc.c
+@@ -407,6 +407,9 @@ NV_STATUS rpcRmApiControl_dce
+     rpc_gsp_rm_control_v *rpc_params = NULL;
+     NV_STATUS status = NV_ERR_NOT_SUPPORTED;
+ 
++    NV_PRINTF(LEVEL_ERROR, "dce-dbg RPCCTRL cmd:0x%x hObject:0x%08x size:%u\n",
++              cmd, hObject, paramsSize);
++
+     NV_PRINTF(LEVEL_INFO, "NVRM_RPC_DCE : Prepare and send RmApiControl RPC\n");
+ 
+     status = _dceRpcAllocateMemory(pRpc);
+@@ -435,6 +438,25 @@ NV_STATUS rpcRmApiControl_dce
+     rpc_params->paramsSize = paramsSize;
+     portMemCopy(rpc_params->params, paramsSize,pParamStructPtr, paramsSize);
+ 
++    /* dce-dbg (5.4 payload diff): first 16 request words */
++    if (paramsSize >= 4)
++    {
++        const NvU32 *w = (const NvU32 *)pParamStructPtr;
++        NvU32 n = paramsSize / 4;
++        NV_PRINTF(LEVEL_ERROR,
++                  "dce-dbg REQ %08x: %08x %08x %08x %08x %08x %08x %08x %08x\n",
++                  cmd, w[0], (n > 1) ? w[1] : 0, (n > 2) ? w[2] : 0,
++                  (n > 3) ? w[3] : 0, (n > 4) ? w[4] : 0, (n > 5) ? w[5] : 0,
++                  (n > 6) ? w[6] : 0, (n > 7) ? w[7] : 0);
++        if (n > 8)
++            NV_PRINTF(LEVEL_ERROR,
++                      "dce-dbg REQ %08x+ %08x %08x %08x %08x %08x %08x %08x %08x\n",
++                      cmd, w[8], (n > 9) ? w[9] : 0, (n > 10) ? w[10] : 0,
++                      (n > 11) ? w[11] : 0, (n > 12) ? w[12] : 0,
++                      (n > 13) ? w[13] : 0, (n > 14) ? w[14] : 0,
++                      (n > 15) ? w[15] : 0);
++    }
++
+     status = _dceRpcIssueAndWait(pRmApi);
+     if (status != NV_OK)
+     {
+@@ -453,6 +475,25 @@ NV_STATUS rpcRmApiControl_dce
+ 
+     portMemCopy(pParamStructPtr, paramsSize, rpc_params->params, paramsSize);
+ 
++    /* dce-dbg (5.4 payload diff): status + first 16 result words */
++    if (paramsSize >= 4)
++    {
++        const NvU32 *w = (const NvU32 *)pParamStructPtr;
++        NvU32 n = paramsSize / 4;
++        NV_PRINTF(LEVEL_ERROR,
++                  "dce-dbg RES %08x s:%08x %08x %08x %08x %08x %08x %08x %08x %08x\n",
++                  cmd, status, w[0], (n > 1) ? w[1] : 0, (n > 2) ? w[2] : 0,
++                  (n > 3) ? w[3] : 0, (n > 4) ? w[4] : 0, (n > 5) ? w[5] : 0,
++                  (n > 6) ? w[6] : 0, (n > 7) ? w[7] : 0);
++        if (n > 8)
++            NV_PRINTF(LEVEL_ERROR,
++                      "dce-dbg RES %08x+ %08x %08x %08x %08x %08x %08x %08x %08x\n",
++                      cmd, w[8], (n > 9) ? w[9] : 0, (n > 10) ? w[10] : 0,
++                      (n > 11) ? w[11] : 0, (n > 12) ? w[12] : 0,
++                      (n > 13) ? w[13] : 0, (n > 14) ? w[14] : 0,
++                      (n > 15) ? w[15] : 0);
++    }
++
+     NV_PRINTF(LEVEL_INFO, "NVRM_RPC_DCE: RPC for GSP RM Control Successful\n");
+ 
+ done:
+@@ -518,6 +559,10 @@ NV_STATUS rpcRmApiAlloc_dce
+     rpc_params->paramsSize = pAllocParams ? paramsSize : 0;
+     portMemCopy(rpc_params->params, rpc_params->paramsSize, pAllocParams, paramsSize);
+ 
++    NV_PRINTF(LEVEL_ERROR,
++              "dce-dbg RPCALLOC hClient:0x%08x hParent:0x%08x hObject:0x%08x hClass:0x%04x size:%u\n",
++              hClient, hParent, hObject, hClass, rpc_params->paramsSize);
++
+     status = _dceRpcIssueAndWait(pRmApi);
+     if (status != NV_OK)
+     {
+@@ -554,6 +599,9 @@ NV_STATUS rpcRmApiFree_dce(RM_API *pRmApi, NvHandle hClient, NvHandle hObject)
+     NVOS00_PARAMETERS_v *rpc_params;
+     NV_STATUS status = NV_ERR_NOT_SUPPORTED;
+ 
++    NV_PRINTF(LEVEL_ERROR, "dce-dbg RPCFREE hClient:0x%08x hObject:0x%08x\n",
++              hClient, hObject);
++
+     NV_PRINTF(LEVEL_INFO, "NVRM_RPC_DCE Free "
+               "RPC Called for hClient: 0x%x\n", hClient);
+ 
+diff --git a/nvdisplay/src/nvidia/src/kernel/gpu/disp/disp_channel.c b/nvdisplay/src/nvidia/src/kernel/gpu/disp/disp_channel.c
+index fa29589..e1c0ccc 100644
+--- a/nvdisplay/src/nvidia/src/kernel/gpu/disp/disp_channel.c
++++ b/nvdisplay/src/nvidia/src/kernel/gpu/disp/disp_channel.c
+@@ -785,6 +785,16 @@ kdispSetPushBufferParamsToPhysical_IMPL
+         pushBufferParams.valid = NV_FALSE;
+     }
+ 
++    /* dce-dbg: log the exact FE-arming parameters for the native diff */
++    NV_PRINTF(LEVEL_ERROR,
++              "dce-dbg CHANNEL_PUSHBUFFER hclass=0x%x inst=%d chNum=%d valid=%d "
++              "addrSpace=%d phys=0x%llx limit=0x%llx snoop=%d\n",
++              pushBufferParams.hclass, pushBufferParams.channelInstance,
++              dispChannelNum, pushBufferParams.valid,
++              pushBufferParams.addressSpace,
++              (NvU64)pushBufferParams.physicalAddr,
++              (NvU64)pushBufferParams.limit, pushBufferParams.cacheSnoop);
++
+     pRmApi->Control(pRmApi, pGpu->hInternalClient, pGpu->hInternalSubdevice,
+                             NV2080_CTRL_CMD_INTERNAL_DISPLAY_CHANNEL_PUSHBUFFER,
+                             &pushBufferParams, sizeof(pushBufferParams));
+diff --git a/nvdisplay/src/nvidia/src/kernel/gpu/disp/inst_mem/arch/v03/disp_inst_mem_0300.c b/nvdisplay/src/nvidia/src/kernel/gpu/disp/inst_mem/arch/v03/disp_inst_mem_0300.c
+index 758eecc..8b5f14d 100644
+--- a/nvdisplay/src/nvidia/src/kernel/gpu/disp/inst_mem/arch/v03/disp_inst_mem_0300.c
++++ b/nvdisplay/src/nvidia/src/kernel/gpu/disp/inst_mem/arch/v03/disp_inst_mem_0300.c
+@@ -177,6 +177,11 @@ instmemCommitContextDma_v03_00
+     FrameAddr += 0x7f00000000ULL;
+     Limit = FrameAddr + pContextDma->Limit;
+     kind = memdescGetPteKindForGpu(pMemDesc, pGpu);
++    NV_PRINTF(LEVEL_ERROR, "dce-dbg CTXDMA hCtxDma=0x%08x FrameAddr=0x%llx absLimit=0x%llx relLimit=0x%llx\n",
++              (NvU32)RES_GET_HANDLE(pContextDma),
++              (unsigned long long)FrameAddr,
++              (unsigned long long)Limit,
++              (unsigned long long)pContextDma->Limit);
+ 
+     // Cannot bind a Z surface to display.  Bug 439965.
+     if (memmgrIsKind_HAL(pMemoryManager, FB_IS_KIND_Z, kind))
+diff --git a/nvdisplay/src/nvidia/src/kernel/gpu/disp/inst_mem/disp_inst_mem.c b/nvdisplay/src/nvidia/src/kernel/gpu/disp/inst_mem/disp_inst_mem.c
+index 8d2a5cb..df53ef0 100644
+--- a/nvdisplay/src/nvidia/src/kernel/gpu/disp/inst_mem/disp_inst_mem.c
++++ b/nvdisplay/src/nvidia/src/kernel/gpu/disp/inst_mem/disp_inst_mem.c
+@@ -388,6 +388,12 @@ instmemStateInitLocked_IMPL
+     ctrlParams.instMemPhysAddr = memdescGetPhysAddr(pInstMem->pInstMemDesc, AT_CPU, 0) + 0x7f00000000ULL;
+     ctrlParams.instMemSize = memdescGetSize(pInstMem->pInstMemDesc);
+ 
++    /* dce-dbg: log the exact FE-arming parameters for the native diff */
++    NV_PRINTF(LEVEL_ERROR,
++              "dce-dbg WRITE_INST_MEM addrSpace=%d cacheAttr=%d phys=0x%llx size=0x%llx\n",
++              ctrlParams.instMemAddrSpace, ctrlParams.instMemCpuCacheAttr,
++              (NvU64)ctrlParams.instMemPhysAddr, (NvU64)ctrlParams.instMemSize);
++
+     NV_CHECK_OK_OR_GOTO(status, LEVEL_ERROR,
+             pRmApi->Control(pRmApi, hClient, hSubdevice,
+                             NV2080_CTRL_CMD_INTERNAL_DISPLAY_WRITE_INST_MEM,

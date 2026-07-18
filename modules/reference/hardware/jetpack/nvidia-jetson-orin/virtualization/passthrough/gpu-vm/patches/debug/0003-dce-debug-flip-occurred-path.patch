@@ -1,0 +1,69 @@
+dce-dbg: trace the flip-occurred delivery chain
+
+POST_EVENTs for the completion notifier ARE delivered (osNotifyEvent runs at
+flip cadence), yet nvidia-drm times out waiting for flip events. Instrument
+each stage: the deferred work that reacts to the RM callback, and every
+silent drop filter in nvSendFlipOccurredEventEvo (openDev lookup, event
+interest mask, flip permissions, handle translation).
+
+--- a/nvdisplay/src/nvidia-modeset/src/nvkms-evo.c
++++ b/nvdisplay/src/nvidia-modeset/src/nvkms-evo.c
+@@ -4284,6 +4284,9 @@ CompletionNotifierEventDeferredWork(void *dataPtr, NvU32 dataU32)
+ {
+     NVDispFlipOccurredEventDataEvoRec *pEventData = dataPtr;
+
++    nvEvoLog(EVO_LOG_ERROR, "dce-dbg FLIPOCC deferred head=%u layer=%u",
++             pEventData->apiHead, pEventData->layer);
++
+     nvSendFlipOccurredEventEvo(pEventData->pDispEvo, pEventData->apiHead,
+                                pEventData->layer);
+ }
+--- a/nvdisplay/src/nvidia-modeset/src/nvkms.c
++++ b/nvdisplay/src/nvidia-modeset/src/nvkms.c
+@@ -5286,6 +5286,9 @@ void nvSendFlipOccurredEventEvo(const NVDispEvoRec *pDispEvo,
+     struct NvKmsPerOpen *pOpen;
+     const NvU32 eventType = NVKMS_EVENT_TYPE_FLIP_OCCURRED;
+
++    nvEvoLog(EVO_LOG_ERROR, "dce-dbg FLIPOCC send head=%u layer=%u",
++             apiHead, layer);
++
+     nvListForEachEntry(pOpen, &perOpenIoctlList, perOpenIoctlListEntry) {
+
+         struct NvKmsEvent event = { 0 };
+@@ -5297,10 +5300,12 @@ void nvSendFlipOccurredEventEvo(const NVDispEvoRec *pDispEvo,
+         pOpenDev = DevEvoToOpenDev(pOpen, pDispEvo->pDevEvo);
+
+         if (pOpenDev == NULL) {
++            nvEvoLog(EVO_LOG_ERROR, "dce-dbg FLIPOCC drop: no openDev");
+             continue;
+         }
+
+         if ((pOpen->ioctl.eventInterestMask & NVBIT(eventType)) == 0) {
++            nvEvoLog(EVO_LOG_ERROR, "dce-dbg FLIPOCC drop: interest mask 0x%x pOpen=%p", pOpen->ioctl.eventInterestMask, pOpen);
+             continue;
+         }
+
+@@ -5308,10 +5313,14 @@ void nvSendFlipOccurredEventEvo(const NVDispEvoRec *pDispEvo,
+
+         if ((pFlipPermissions->disp[pDispEvo->displayOwner].
+                 head[apiHead].layerMask & NVBIT(layer)) == 0x0) {
++            nvEvoLog(EVO_LOG_ERROR, "dce-dbg FLIPOCC drop: perms owner=%u head=%u layer=%u mask=0x%x",
++                     pDispEvo->displayOwner, apiHead, layer,
++                     pFlipPermissions->disp[pDispEvo->displayOwner].head[apiHead].layerMask);
+             continue;
+         }
+
+         if (!DispEvoToDevAndDispHandles(pOpen, pDispEvo,
+                                         &deviceHandle, &dispHandle)) {
++            nvEvoLog(EVO_LOG_ERROR, "dce-dbg FLIPOCC drop: no handles");
+             continue;
+         }
+
+@@ -5322,6 +5331,7 @@ void nvSendFlipOccurredEventEvo(const NVDispEvoRec *pDispEvo,
+         event.u.flipOccurred.head = apiHead;
+         event.u.flipOccurred.layer = layer;
+
++        nvEvoLog(EVO_LOG_ERROR, "dce-dbg FLIPOCC delivered head=%u layer=%u", apiHead, layer);
+         SendEvent(pOpen, &event);
+     }
+ }

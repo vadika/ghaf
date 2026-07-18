@@ -1,0 +1,23 @@
+From: vadik likholetov <vadikas@gmail.com>
+Subject: [PATCH] dce: build the dce-probe-test module alongside tegra-dce
+
+dce-probe-test.c is carried as a plain source file under
+../sources/drivers/platform/tegra/dce/ (spliced in by dce-virt-common's
+default.nix), not as an addition in this diff, so it can be read and
+reviewed as code rather than as a patch.
+
+Add it as its own obj-m target so it links against the EXPORT_SYMBOL'd
+DCE client IPC API (tegra_dce_register_ipc_client() and friends) without
+being folded into tegra-dce-objs. The dce/Makefile's existing ccflags-y
+already resolves the public dce-client-ipc.h include, so no extra -I is
+needed.
+---
+diff --git a/drivers/platform/tegra/dce/Makefile b/drivers/platform/tegra/dce/Makefile
+--- a/drivers/platform/tegra/dce/Makefile
++++ b/drivers/platform/tegra/dce/Makefile
+@@ -33,3 +33,5 @@
+ 	dce-admin-debug.o \
+ 	dce-debug-perf.o
+ endif
++
++obj-m += dce-probe-test.o

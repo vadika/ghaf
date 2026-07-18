@@ -1,0 +1,10 @@
+--- a/nvdisplay/src/nvidia-modeset/src/nvkms-evo.c
++++ b/nvdisplay/src/nvidia-modeset/src/nvkms-evo.c
+@@ -4295,6 +4295,7 @@
+ static void CompletionNotifierEvent(void *arg, void *pEventDataVoid,
+                                     NvU32 hEvent, NvU32 Data, NV_STATUS Status)
+ {
++  nvEvoLog(EVO_LOG_ERROR, "dce-dbg FLIPOCC rm-cb hEvent=0x%x", hEvent);
+   (void) nvkms_alloc_timer_with_ref_ptr(
+         CompletionNotifierEventDeferredWork, /* callback */
+         arg, /* argument (this is a ref_ptr to NVDispFlipOccurredEventDataEvoRec) */

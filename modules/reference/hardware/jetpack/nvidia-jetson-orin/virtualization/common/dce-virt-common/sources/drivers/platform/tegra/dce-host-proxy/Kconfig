@@ -1,0 +1,10 @@
+# SPDX-License-Identifier: GPL-2.0-only
+config TEGRA_DCE_HOST_PROXY
+	bool "Tegra DCE host proxy support"
+	help
+	  Exposes the DCE client IPC (CPU_RM interface) to the user level,
+	  in order to relay a guest's DCE display IPC to the real,
+	  host-owned DCE.
+
+	  Say Y here to enable this driver and to compile this driver as a
+	  module, choose M here. If unsure, say N
