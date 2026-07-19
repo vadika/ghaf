@@ -50,27 +50,31 @@ let
 
   # Devices passed to gpu-vm. Reserved-memory carveouts take an explicit
   # mmio-base for 1:1 GPA=HPA; engines use the default mapping.
-  reservedMem = [
-    {
+  reservedMem =
+    # 64MiB syncpoint shim: moves with physical host1x -- dropped in both experiments.
+    lib.optional (!dropHost1x) {
       dev = "60000000.vm_hs_p";
       base = "0x60000000";
     }
-    {
-      dev = "80000000.vm_cma_p";
-      base = "0x80000000";
-    }
-    {
+    ++ [
+      {
+        dev = "80000000.vm_cma_p";
+        base = "0x80000000";
+      }
+    ]
+    # GPU VRAM: dropped when GA10B is removed (display-only VM).
+    ++ lib.optional (!displayOnly) {
       dev = "100000000.vm_cma_vram_p";
       base = "0x100000000";
     }
     # 1:1 scanout carveout: nvdisplay allocates its scanout surface here and
     # the host-owned DCE R5 DMAs it at the same PA. Mirrors scanout/scanout_p
     # in gpu_passthrough_overlay.dts and dce_scanout in tegra234-gpuvm.dts.
-    {
+    # Only meaningful with display present.
+    ++ lib.optional (!computeOnly) {
       dev = "b0000000.scanout_p";
       base = "0xb0000000";
-    }
-  ];
+    };
   # GPU compute engines. Neither dce@d800000 nor display@13800000 is here: the
   # host keeps the real DCE, bootstraps its R5, and the R5 drives display@13800000
   # directly. Passing display to the guest via vfio resets it and halts the R5
@@ -81,13 +85,16 @@ let
   # syncpoints. If the R5 still halts with display host-side, host1x is the next
   # candidate to keep host-side (it would then cost guest GPU compute until the
   # guest gets a virtual host1x).
-  engines = [
-    "17000000.gpu"
-    "13e00000.host1x_pt"
-    "15340000.vic"
-    "15480000.nvdec"
-    "15540000.nvjpg"
-  ];
+  engines =
+    # GA10B is dropped in the display-only VM.
+    lib.optional (!displayOnly) "17000000.gpu"
+    # host1x + media move together, dropped in both experiments.
+    ++ lib.optionals (!dropHost1x) [
+      "13e00000.host1x_pt"
+      "15340000.vic"
+      "15480000.nvdec"
+      "15540000.nvjpg"
+    ];
   # Keyhole MMIO passthrough: the single 4KB read-only EVO display-capabilities
   # strap page (display base + 0x30000 = 0x13830000), placed in the guest at its
   # display-aperture caps offset (0x66200000 + 0x30000 = 0x66230000) via the
@@ -110,7 +117,9 @@ let
   # instantiates OBJDPAUX, so no guest code touches those registers -- EDID and AUX
   # are RmControl -> DCE-RPC, serviced by the R5, which owns the pads. Keyholing
   # them changed nothing on hardware.
-  dispCaps = [
+  # Entire list dropped in compute-only: the display keyholes are meaningless
+  # without the display stack.
+  dispCaps = lib.optionals (!computeOnly) [
     {
       dev = "13830000.disp_caps_pt";
       base = "0x66230000";
@@ -642,27 +651,38 @@ in
           # fails and no compute is possible). nvgpu pulls nvmap/host1x/nvhost
           # via module dependencies; listed explicitly for robustness.
           boot.extraModulePackages = [ config.boot.kernelPackages.nvidia-oot-modules ];
-          boot.kernelModules = [
-            "nvmap"
-            "host1x"
-            "nvhost"
-            "nvgpu"
+          boot.kernelModules =
+            # nvmap/host1x(sw)/nvhost/nvgpu: the GPU compute stack. host1x here is
+            # the software module satisfying nvgpu's symbols, not the physical
+            # VFIO device (which is absent in both experiments). Dropped in the
+            # display-only VM (no GA10B there).
+            lib.optionals (!displayOnly) [
+              "nvmap"
+              "host1x"
+              "nvhost"
+              "nvgpu"
+            ]
             # DCE display proxy (guest): tegra-dce binds the synthetic dce node
             # (dce-virtual-pa, no reg) in proxy mode; dce-guest-proxy binds the
             # nvidia,dce-guest-proxy node, ioremaps the shared window and installs
             # the send redirect. Neither autoloads from a DT match (OOT modules),
             # so load them explicitly. dce-guest-proxy links tegra-dce's exported
             # redirect symbol, so modprobe orders tegra-dce first.
-            "tegra-dce"
-            "dce-guest-proxy"
+            #
             # Display KMS stack: gives the guest a /dev/dri KMS device + crtcs for
             # display@13800000 (bound by nv_platform). With nvidia-drm.modeset=1 +
             # fbdev=1 (kernelParams) fbcon draws to the panel -> the modeset that
             # makes nvdisplay bring up the display -> DCE handshake via the proxy.
-            # nvidia-drm pulls nvidia-modeset + nvidia via module deps.
-            "nvidia-modeset"
-            "nvidia-drm"
-          ];
+            # nvidia-drm pulls nvidia-modeset + nvidia via module deps. Dropped in
+            # compute-only. nvmap appears in both arms deliberately -- the module
+            # list de-duplicates; kept explicit so either arm alone is complete.
+            ++ lib.optionals (!computeOnly) [
+              "nvmap"
+              "tegra-dce"
+              "dce-guest-proxy"
+              "nvidia-modeset"
+              "nvidia-drm"
+            ];
 
           # gk20a boots the GPU's falcon microcode (fecs/gpccs/gpmu) from
           # /lib/firmware at probe time. The minimal guest ships no firmware
