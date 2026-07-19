@@ -40,6 +40,11 @@ static const struct { u64 pa; u64 size; } dce_hi_ranges[] = {
 	{ 0x60000000, 0x04000000 },  /* vm_hs */
 	{ 0x80000000, 0x30000000 },  /* vm_cma */
 	{ 0xb0000000, 0x08000000 },  /* scanout */
+	{ 0xe2000000, 0x04000000 },  /* disp-vm CMA (split-RAM low bank): NVKMS
+				      * allocates 3440x1440 scanout from here, not
+				      * from 0xb0 scanout pool. Inside 1:1 dispram_lo
+				      * (0xb8..0xe6), stops before the DMA32/WLAN hole.
+				      * Without this, SID-7 faults on 0x7fe2xxxxxx. */
 };
 
 static int ovcs_id;

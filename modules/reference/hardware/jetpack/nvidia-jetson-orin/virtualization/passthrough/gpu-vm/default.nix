@@ -33,46 +33,96 @@ let
   # reference it without the inner `config` shadow picking up the guest config.
   virt = config.ghaf.hardware.nvidia.virtualization;
 
-  # Reserved-memory carveouts take an explicit mmio-base for 1:1 GPA=HPA;
-  # engines use the default mapping.
-  reservedMem = [
-    {
+  # Host1x-ownership experiment (experiment/orin-two-vm-host1x). Both directions
+  # drop physical host1x + the 64MiB syncpoint shim + media engines (they move as
+  # one unit). compute-no-host1x additionally drops display/DCE; display-no-host1x
+  # additionally drops GA10B/nvgpu and forces NVKMS no-syncpt mode.
+  exp = cfg.host1xExperiment;
+  computeNoHost1x = exp == "compute-no-host1x";
+  computeWithHost1x = exp == "compute-with-host1x";
+  displayOnly = exp == "display-no-host1x";
+  # host1x + 64MiB shim + media move as one unit; dropped only where host1x is
+  # removed (the two no-host1x experiments), kept for off and compute-with-host1x.
+  dropHost1x = computeNoHost1x || displayOnly;
+  # display/DCE/scanout/keyholes dropped for both compute VMs (neither drives display).
+  dropDisplay = computeNoHost1x || computeWithHost1x;
+
+  # cpp -D flags that strip/resize guest DT nodes for the host1x experiment.
+  expDtDefines =
+    lib.optionalString dropHost1x "-DEXP_DROP_HOST1X "
+    + lib.optionalString dropDisplay "-DEXP_DROP_DISPLAY "
+    + lib.optionalString displayOnly "-DEXP_DROP_GPU "
+    # Concurrent GPU VM: shrink memory@ bank1 to 0x80000000..0xb0000000 so it no
+    # longer needs the scanout carveout, releasing 0xb0000000 for the GUI VM.
+    + lib.optionalString computeWithHost1x "-DEXP_SHRINK_BANK1 ";
+
+  # Devices passed to gpu-vm. Reserved-memory carveouts take an explicit
+  # mmio-base for 1:1 GPA=HPA; engines use the default mapping.
+  reservedMem =
+    # 64MiB syncpoint shim: moves with physical host1x -- dropped in both experiments.
+    lib.optional (!dropHost1x) {
       dev = "60000000.vm_hs_p";
       base = "0x60000000";
     }
-    {
-      dev = "80000000.vm_cma_p";
-      base = "0x80000000";
-    }
-    {
-      dev = "100000000.vm_cma_vram_p";
-      base = "0x100000000";
-    }
-    # 1:1 scanout carveout: nvdisplay allocates its scanout surface here and
-    # the host-owned DCE R5 DMAs it at the same PA. Mirrors scanout/scanout_p
-    # in gpu_passthrough_overlay.dts and dce_scanout in tegra234-gpuvm.dts.
-    {
+    ++ [
+      {
+        dev = "80000000.vm_cma_p";
+        base = "0x80000000";
+      }
+    ]
+    # GPU VRAM carveout (4GiB @ 0x100000000). Like scanout_p, this is
+    # LOAD-BEARING for the guest RAM map: the (ungated) guest memory@80000000
+    # node's bank2 is <0x1 0x0 0x1 0x0> = 0x100000000..0x200000000, backed 1:1
+    # ONLY by this carveout. Dropping it in display-no-host1x left bank2
+    # unbacked -> guest kernel panicked in early mem init before console (same
+    # class as the scanout_p bug). Keep it in every mode; a display VM never
+    # uses it as VRAM, it just backs the RAM bank the memory node already
+    # claims. Proper fix (slim the guest memory map) is a follow-up.
+    ++ [
+      {
+        dev = "100000000.vm_cma_vram_p";
+        base = "0x100000000";
+      }
+    ]
+    # 1:1 scanout carveout (128MiB @ 0xb0000000). Beyond the display scanout
+    # surface, this is LOAD-BEARING for the guest RAM map: the (ungated) guest
+    # memory@80000000 node declares bank1 as 0x80000000..0xb8000000, whose top
+    # 128MiB tail (0xb0000000..0xb8000000) is physically backed ONLY by this
+    # carveout mapped 1:1. Dropping it in compute-no-host1x left that tail
+    # unbacked, so swiotlb_init memset'd into a hole and the guest kernel
+    # panicked at start_kernel before any console (root-caused via earlycon,
+    # 2026-07-19). Keep it in every mode; the compute VM never touches it as
+    # display, it just backs the RAM the memory node already claims. Proper
+    # fix (slim the guest memory map for a display-less VM) is a follow-up.
+    #
+    # compute-with-host1x is that follow-up: it sets EXP_SHRINK_BANK1 so the guest
+    # memory@ bank1 ends at 0xb0000000 and no longer spans this carveout, so it
+    # both drops scanout here AND releases 0xb0000000 for the concurrent GUI VM.
+    ++ lib.optional (!computeWithHost1x) {
       dev = "b0000000.scanout_p";
       base = "0xb0000000";
-    }
-  ];
+    };
   # GPU compute engines. Neither dce@d800000 nor display@13800000 is here: the
   # host keeps the real DCE, bootstraps its R5, and the R5 drives display@13800000
   # directly. Passing display to the guest via vfio resets it and halts the R5
   # (DCE_HALTED at dce_ss_set), so display stays host-side and unbound; the guest
   # reaches the panel only through the DCE host-proxy IPC path.
   #
-  # host1x@13e00000 is still passed: the guest GPU stack (nvgpu) needs host1x
-  # syncpoints. If the R5 still halts with display host-side, host1x is the next
-  # candidate to keep host-side (it would then cost guest GPU compute until the
-  # guest gets a virtual host1x).
-  engines = [
-    "17000000.gpu"
-    "13e00000.host1x_pt"
-    "15340000.vic"
-    "15480000.nvdec"
-    "15540000.nvjpg"
-  ];
+  # host1x@13e00000 is passed in off/default: the guest GPU stack (nvgpu) needs
+  # host1x syncpoints. It (+ shim + media) is dropped in BOTH host1x-ownership
+  # experiments (gated on !dropHost1x below). If the R5 still halts with display
+  # host-side, host1x is the next candidate to keep host-side (it would then cost
+  # guest GPU compute until the guest gets a virtual host1x).
+  engines =
+    # GA10B is dropped in the display-only VM.
+    lib.optional (!displayOnly) "17000000.gpu"
+    # host1x + media move together, dropped in both experiments.
+    ++ lib.optionals (!dropHost1x) [
+      "13e00000.host1x_pt"
+      "15340000.vic"
+      "15480000.nvdec"
+      "15540000.nvjpg"
+    ];
   # Keyhole MMIO passthrough: the single 4KB read-only EVO display-capabilities
   # strap page (display base + 0x30000 = 0x13830000), placed in the guest at its
   # display-aperture caps offset (0x66200000 + 0x30000 = 0x66230000) via the
@@ -95,7 +145,9 @@ let
   # instantiates OBJDPAUX, so no guest code touches those registers -- EDID and AUX
   # are RmControl -> DCE-RPC, serviced by the R5, which owns the pads. Keyholing
   # them changed nothing on hardware.
-  dispCaps = [
+  # Entire list dropped in compute-only: the display keyholes are meaningless
+  # without the display stack.
+  dispCaps = lib.optionals (!dropDisplay) [
     {
       dev = "13830000.disp_caps_pt";
       base = "0x66230000";
@@ -140,9 +192,10 @@ let
       in
       ''
         cp $src tegra234-gpuvm.dts
-        # $CC = stdenv's compiler (triple-prefixed under cross); -E only
-        # preprocesses, so the target triple is irrelevant to the text output.
-        $CC -E -nostdinc -undef -D__DTS__ -x assembler-with-cpp \
+        # $CC is set by stdenv to the toolchain's compiler (triple-prefixed in a
+        # cross build, where a bare `gcc` does not exist); -E only preprocesses,
+        # so the target triple is irrelevant to the text output.
+        $CC -E -nostdinc -undef -D__DTS__ ${expDtDefines}-x assembler-with-cpp \
           -I${mainInc} \
           -I${./nv-dt-bindings} \
           tegra234-gpuvm.dts > preprocessed.dts
@@ -161,6 +214,26 @@ in
     type = lib.types.bool;
     default = false;
     description = "Pass the Tegra234 GPU and engines through to gpu-vm on NVIDIA Orin AGX";
+  };
+
+  options.ghaf.hardware.nvidia.passthroughs.gpu_vm.host1xExperiment = lib.mkOption {
+    type = lib.types.enum [
+      "off"
+      "compute-no-host1x"
+      "display-no-host1x"
+      "compute-with-host1x"
+    ];
+    default = "off";
+    description = ''
+      Branch-only host1x-ownership experiment selector (experiment/orin-two-vm-host1x).
+      "off" reproduces the validated combined-gpuvm build. "compute-no-host1x"
+      strips host1x/shim/media/display for the GPU-compute feasibility gate.
+      "display-no-host1x" strips host1x/shim/media/gpu and forces NVKMS no-syncpt
+      mode for the software-display feasibility gate. "compute-with-host1x" is the
+      concurrent-test GPU VM: KEEPS host1x/shim/media/gpu, drops display, and
+      shrinks guest RAM bank1 to release the scanout carveout for the GUI VM.
+      Never promote to a target.
+    '';
   };
 
   config = lib.mkIf cfg.enable {
@@ -367,7 +440,15 @@ in
         ) allDevs;
       };
     };
-    systemd.services."microvm@gpu-vm".after = [ "bindGpuVm.service" ];
+    systemd.services."microvm@gpu-vm" = {
+      after = [ "bindGpuVm.service" ];
+      # Exclusive DCE ownership (opt-in): the QEMU DCE bridge is created only
+      # when GHAF_DCE_GUEST=1 (ghaf-qemu-bpmp patch 0002). A display-capable
+      # GPU-VM (display NOT dropped) owns DCE, so it opts in. A display-less
+      # GPU-VM (compute-no-host1x / compute-with-host1x) leaves it unset -> never opens
+      # /dev/dce-host, so it cannot steal disp-vm's DCE events.
+      environment = lib.mkIf (!dropDisplay) { GHAF_DCE_GUEST = "1"; };
+    };
 
     # Host DT overlay exposing the GPU nodes to passthrough.
     hardware.deviceTree.overlays = [
@@ -541,6 +622,9 @@ in
                       # firmware.
                       ./patches/0013-drm-vblank-flip-completion.patch
                     ]
+                    # Experiment B (display-no-host1x): NVKMS no-syncpt path.
+                    # Branch-scoped — never globally disable syncpoints.
+                    ++ lib.optional displayOnly ./patches/0021-nvkms-force-no-syncpt-support.patch
                     # dce-dbg bring-up instrumentation (ctxdma/pushbuffer/instmem
                     # FE-arming params, DISPRM RPC + payload hexdumps, core PB
                     # dumps, DP attach + SOR assignment + RG probes). Applies on
@@ -623,27 +707,38 @@ in
           # dwmac), so load them explicitly -- else nothing binds gpu@17000000,
           # no /dev/nvgpu|nvmap|nvhost-*, and CUDA's NvRmMemMgr init fails.
           boot.extraModulePackages = [ config.boot.kernelPackages.nvidia-oot-modules ];
-          boot.kernelModules = [
-            "nvmap"
-            "host1x"
-            "nvhost"
-            "nvgpu"
+          boot.kernelModules =
+            # nvmap/host1x(sw)/nvhost/nvgpu: the GPU compute stack. host1x here is
+            # the software module satisfying nvgpu's symbols, not the physical
+            # VFIO device (which is absent in both experiments). Dropped in the
+            # display-only VM (no GA10B there).
+            lib.optionals (!displayOnly) [
+              "nvmap"
+              "host1x"
+              "nvhost"
+              "nvgpu"
+            ]
             # DCE display proxy (guest): tegra-dce binds the synthetic dce node
             # (dce-virtual-pa, no reg) in proxy mode; dce-guest-proxy binds the
             # nvidia,dce-guest-proxy node, ioremaps the shared window and installs
             # the send redirect. Neither autoloads from a DT match (OOT modules),
             # so load them explicitly. dce-guest-proxy links tegra-dce's exported
             # redirect symbol, so modprobe orders tegra-dce first.
-            "tegra-dce"
-            "dce-guest-proxy"
+            #
             # Display KMS stack: gives the guest a /dev/dri KMS device + crtcs for
             # display@13800000 (bound by nv_platform). With nvidia-drm.modeset=1 +
             # fbdev=1 (kernelParams) fbcon draws to the panel -> the modeset that
             # makes nvdisplay bring up the display -> DCE handshake via the proxy.
-            # nvidia-drm pulls nvidia-modeset + nvidia via module deps.
-            "nvidia-modeset"
-            "nvidia-drm"
-          ];
+            # nvidia-drm pulls nvidia-modeset + nvidia via module deps. Dropped in
+            # compute-only. nvmap appears in both arms deliberately -- the module
+            # list de-duplicates; kept explicit so either arm alone is complete.
+            ++ lib.optionals (!dropDisplay) [
+              "nvmap"
+              "tegra-dce"
+              "dce-guest-proxy"
+              "nvidia-modeset"
+              "nvidia-drm"
+            ];
 
           # gk20a loads falcon microcode from /lib/firmware at probe; without it
           # the probe times out (-110). Ship the L4T GPU firmware.

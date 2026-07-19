@@ -97,6 +97,16 @@ in
         Profiles can extend this with extendModules if customization needed.
       '';
     };
+
+    # Disp VM base configuration for profiles to extend
+    dispvmBase = lib.mkOption {
+      type = lib.types.unspecified;
+      readOnly = true;
+      description = ''
+        Orin Disp VM base configuration.
+        Profiles can extend this with extendModules if customization needed.
+      '';
+    };
   };
 
   config = lib.mkIf cfg.enable {
@@ -174,6 +184,30 @@ in
             hostConfig = lib.ghaf.vm.mkHostConfig {
               inherit config;
               vmName = "gpu-vm";
+            };
+          };
+        };
+
+        # Export Disp VM base for profiles to extend
+        orin.dispvmBase = lib.nixosSystem {
+          modules = [
+            inputs.microvm.nixosModules.microvm
+            inputs.self.nixosModules.dispvm-base
+            # Import nixpkgs config module to get overlays
+            {
+              nixpkgs = {
+                hostPlatform.system = "aarch64-linux";
+                inherit (config.nixpkgs) overlays;
+                inherit (config.nixpkgs) config;
+              };
+            }
+          ];
+          specialArgs = lib.ghaf.vm.mkSpecialArgs {
+            inherit lib inputs;
+            globalConfig = hostGlobalConfig;
+            hostConfig = lib.ghaf.vm.mkHostConfig {
+              inherit config;
+              vmName = "disp-vm";
             };
           };
         };
@@ -272,6 +306,21 @@ in
               modules = lib.ghaf.vm.applyVmConfig {
                 inherit config;
                 vmName = "gpuvm";
+              };
+            };
+          };
+
+          # Disp VM: enable comes from the disp-vm passthrough module
+          # (ghaf.hardware.nvidia.passthroughs.disp_vm), which sets
+          # ghaf.virtualization.microvm.dispvm.enable = true under its own mkIf.
+          # Here we only provide the evaluatedConfig, extending dispvmBase with
+          # the hardware.definition.dispvm.extraModules (DTB, vfio, guest kernel)
+          # via applyVmConfig.
+          dispvm = {
+            evaluatedConfig = config.ghaf.profiles.orin.dispvmBase.extendModules {
+              modules = lib.ghaf.vm.applyVmConfig {
+                inherit config;
+                vmName = "dispvm";
               };
             };
           };

@@ -93,6 +93,9 @@ static const struct { u64 pa; u64 size; } dce_hi_ranges[] = {
 	{ 0x60000000, 0x04000000 },  /* vm_hs */
 	{ 0x80000000, 0x30000000 },  /* vm_cma */
 	{ 0xb0000000, 0x08000000 },  /* scanout */
+	{ 0xe2000000, 0x04000000 },  /* disp-vm CMA (split-RAM low bank) -- mirror
+				      * of the iso-anchor range; NVKMS scanout lands
+				      * at 0xe2, not the 0xb0 pool. See dce-iso-anchor.c. */
 };
 
 static int dce_himap_show(struct seq_file *s, void *unused)

@@ -44,6 +44,15 @@
       # p3737 carrier); pass it through to net-vm. Orin NX has no MGBE0.
       nvidia.passthroughs.mgbe0_net_vm.enable = true;
       nvidia.passthroughs.gpu_vm.enable = true;
+      # Branch-only host1x-ownership experiment selector (experiment/orin-two-vm-host1x).
+      # "compute-with-host1x" is the concurrent GPU VM (keeps host1x/gpu/media,
+      # releases scanout for disp-vm) -- paired with disp_vm.enable below for the
+      # Step 2 concurrent two-VM build. Never promote off "off".
+      nvidia.passthroughs.gpu_vm.host1xExperiment = "compute-with-host1x";
+      # Second, display-only microvm for the concurrent two-VM build (Step 2).
+      # Branch-only; owns only scanout_p/disp_caps_pt/disp_chan_pt, disjoint
+      # from gpu_vm's device list above.
+      nvidia.passthroughs.disp_vm.enable = true;
 
       # Net VM hardware-specific modules - use hardware.definition for composition model
       definition.netvm.extraModules = [
