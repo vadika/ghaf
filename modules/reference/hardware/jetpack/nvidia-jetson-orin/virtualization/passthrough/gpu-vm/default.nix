@@ -574,6 +574,9 @@ in
                       # firmware.
                       ./patches/0013-drm-vblank-flip-completion.patch
                     ]
+                    # Experiment B (display-no-host1x): NVKMS no-syncpt path.
+                    # Branch-scoped — never globally disable syncpoints.
+                    ++ lib.optional displayOnly ./patches/0021-nvkms-force-no-syncpt-support.patch
                     # dce-dbg bring-up instrumentation (ctxdma/pushbuffer/instmem
                     # FE-arming params, DISPRM RPC + payload hexdumps, core PB
                     # dumps, DP attach + SOR assignment + RG probes). Applies on
