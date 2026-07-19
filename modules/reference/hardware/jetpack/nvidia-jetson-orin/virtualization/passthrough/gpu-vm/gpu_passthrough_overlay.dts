@@ -80,7 +80,7 @@
             // (mmio-base=0xb0000000) into the guest for the nvdisplay scanout.
             scanout_p: scanout_p@b0000000 {
                 compatible = "nvidia,dummy";
-                iommus = <&smmu_niso0 TEGRA234_SID_PASSTHROUGH>;
+                iommus = <&smmu_niso0 0x7d> /* concurrent: distinct group from GPU, DMA-less wrapper */;
                 reg = <0x0 0xB0000000 0x0 0x08000000>;				// 128MB
                 dma-coherent;
                 status = "okay";
@@ -322,7 +322,7 @@
             disp_caps_pt: disp_caps_pt@13830000 {
                 compatible = "nvidia,dummy";
                 reg = <0x0 0x13830000 0x0 0x1000>;
-                iommus = <&smmu_niso0 TEGRA234_SID_PASSTHROUGH>;
+                iommus = <&smmu_niso0 0x7d> /* concurrent: distinct group */;
                 dma-coherent;
                 status = "okay";
             };
@@ -347,7 +347,7 @@
             disp_chan_pt: disp_chan_pt@13870000 {
                 compatible = "nvidia,dummy";
                 reg = <0x0 0x13870000 0x0 0x20000>;
-                iommus = <&smmu_niso0 TEGRA234_SID_PASSTHROUGH>;
+                iommus = <&smmu_niso0 0x7d> /* concurrent: distinct group */;
                 dma-coherent;
                 status = "okay";
             };
