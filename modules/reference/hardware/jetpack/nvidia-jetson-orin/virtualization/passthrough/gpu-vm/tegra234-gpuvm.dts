@@ -56,8 +56,16 @@
 	// QEMU add the main main memory here (6GB), but we have to define the
 	// passthrough memory regions.
 	memory@80000000 {
+#ifdef EXP_SHRINK_BANK1
+		// Concurrent GPU VM (compute-with-host1x): bank1 ends at 0xb0000000, so
+		// the guest no longer spans the scanout carveout -> scanout_p is dropped
+		// and 0xb0000000 is released to the GUI VM. (bank2 GPU VRAM unchanged.)
+		reg = <0x00 0x80000000 0x00 0x30000000>,  // 0x80000000..0xb0000000 (no scanout tail)
+		      <0x01 0x00000000 0x01 0x00000000>;  // For GPU VRAM
+#else
 		reg = <0x00 0x80000000 0x00 0x38000000>,  // For CMA regions + 128MB scanout tail
 		      <0x01 0x00000000 0x01 0x00000000>;  // For GPU VRAM
+#endif
 		device_type = "memory";
 	};
 

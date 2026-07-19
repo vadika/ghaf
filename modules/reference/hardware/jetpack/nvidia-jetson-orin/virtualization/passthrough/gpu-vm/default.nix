@@ -38,15 +38,23 @@ let
   # one unit). compute-no-host1x additionally drops display/DCE; display-no-host1x
   # additionally drops GA10B/nvgpu and forces NVKMS no-syncpt mode.
   exp = cfg.host1xExperiment;
-  dropHost1x = exp != "off";
-  computeOnly = exp == "compute-no-host1x";
+  computeNoHost1x = exp == "compute-no-host1x";
+  computeWithHost1x = exp == "compute-with-host1x";
   displayOnly = exp == "display-no-host1x";
+  # host1x + 64MiB shim + media move as one unit; dropped only where host1x is
+  # removed (the two no-host1x experiments), kept for off and compute-with-host1x.
+  dropHost1x = computeNoHost1x || displayOnly;
+  # display/DCE/scanout/keyholes dropped for both compute VMs (neither drives display).
+  dropDisplay = computeNoHost1x || computeWithHost1x;
 
-  # cpp -D flags that strip guest DT nodes for the host1x experiment (Task 2).
+  # cpp -D flags that strip/resize guest DT nodes for the host1x experiment.
   expDtDefines =
     lib.optionalString dropHost1x "-DEXP_DROP_HOST1X "
-    + lib.optionalString computeOnly "-DEXP_DROP_DISPLAY "
-    + lib.optionalString displayOnly "-DEXP_DROP_GPU ";
+    + lib.optionalString dropDisplay "-DEXP_DROP_DISPLAY "
+    + lib.optionalString displayOnly "-DEXP_DROP_GPU "
+    # Concurrent GPU VM: shrink memory@ bank1 to 0x80000000..0xb0000000 so it no
+    # longer needs the scanout carveout, releasing 0xb0000000 for the GUI VM.
+    + lib.optionalString computeWithHost1x "-DEXP_SHRINK_BANK1 ";
 
   # Devices passed to gpu-vm. Reserved-memory carveouts take an explicit
   # mmio-base for 1:1 GPA=HPA; engines use the default mapping.
@@ -86,12 +94,14 @@ let
     # 2026-07-19). Keep it in every mode; the compute VM never touches it as
     # display, it just backs the RAM the memory node already claims. Proper
     # fix (slim the guest memory map for a display-less VM) is a follow-up.
-    ++ [
-      {
-        dev = "b0000000.scanout_p";
-        base = "0xb0000000";
-      }
-    ];
+    #
+    # compute-with-host1x is that follow-up: it sets EXP_SHRINK_BANK1 so the guest
+    # memory@ bank1 ends at 0xb0000000 and no longer spans this carveout, so it
+    # both drops scanout here AND releases 0xb0000000 for the concurrent GUI VM.
+    ++ lib.optional (!computeWithHost1x) {
+      dev = "b0000000.scanout_p";
+      base = "0xb0000000";
+    };
   # GPU compute engines. Neither dce@d800000 nor display@13800000 is here: the
   # host keeps the real DCE, bootstraps its R5, and the R5 drives display@13800000
   # directly. Passing display to the guest via vfio resets it and halts the R5
@@ -137,7 +147,7 @@ let
   # them changed nothing on hardware.
   # Entire list dropped in compute-only: the display keyholes are meaningless
   # without the display stack.
-  dispCaps = lib.optionals (!computeOnly) [
+  dispCaps = lib.optionals (!dropDisplay) [
     {
       dev = "13830000.disp_caps_pt";
       base = "0x66230000";
@@ -214,6 +224,7 @@ in
       "off"
       "compute-no-host1x"
       "display-no-host1x"
+      "compute-with-host1x"
     ];
     default = "off";
     description = ''
@@ -221,7 +232,10 @@ in
       "off" reproduces the validated combined-gpuvm build. "compute-no-host1x"
       strips host1x/shim/media/display for the GPU-compute feasibility gate.
       "display-no-host1x" strips host1x/shim/media/gpu and forces NVKMS no-syncpt
-      mode for the software-display feasibility gate. Never promote to a target.
+      mode for the software-display feasibility gate. "compute-with-host1x" is the
+      concurrent-test GPU VM: KEEPS host1x/shim/media/gpu, drops display, and
+      shrinks guest RAM bank1 to release the scanout carveout for the GUI VM.
+      Never promote to a target.
     '';
   };
 
@@ -676,9 +690,10 @@ in
           # guest dies ~7s with zero ttyAMA0 output while off-mode boots fine.
           # earlycon on the guest pl011 (stdout-path /pl011@9000000) captures the
           # pre-console phase; keep_bootcon keeps it live past console handover.
-          # Gated to both experiments (dropHost1x) so off stays byte-identical.
-          # Remove once the gating-specific early failures are root-caused.
-          ++ lib.optionals dropHost1x [
+          # Gated to any experiment value (exp != off) so off stays byte-identical
+          # -- includes compute-with-host1x, whose bank1 shrink risks swiotlb
+          # placement and wants console visibility. Remove before promotion.
+          ++ lib.optionals (exp != "off") [
             "earlycon=pl011,mmio32,0x09000000"
             "keep_bootcon"
             "ignore_loglevel"
@@ -718,7 +733,7 @@ in
             # nvidia-drm pulls nvidia-modeset + nvidia via module deps. Dropped in
             # compute-only. nvmap appears in both arms deliberately -- the module
             # list de-duplicates; kept explicit so either arm alone is complete.
-            ++ lib.optionals (!computeOnly) [
+            ++ lib.optionals (!dropDisplay) [
               "nvmap"
               "tegra-dce"
               "dce-guest-proxy"
