@@ -47,7 +47,7 @@
       # Branch-only host1x-ownership experiment selector (experiment/orin-two-vm-host1x).
       # Flip to "compute-no-host1x" / "display-no-host1x" for the respective
       # feasibility gate, then back to "off" when done. Never promote off "off".
-      nvidia.passthroughs.gpu_vm.host1xExperiment = "off";
+      nvidia.passthroughs.gpu_vm.host1xExperiment = "display-no-host1x";
 
       # Net VM hardware-specific modules - use hardware.definition for composition model
       definition.netvm.extraModules = [

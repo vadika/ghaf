@@ -110,13 +110,16 @@
 		// nvmap compatible: it is declared in the memory node, and without
 		// a no-map cover the kernel allocates from it at early boot and
 		// hangs before the console (learned the hard way, twice).
-#ifndef EXP_DROP_GPU
+		// NOT gated by EXP_DROP_GPU: this no-map reservation is a memory-map
+		// property (covers the 4GB memory@ bank2), independent of the GPU
+		// device. Dropping it in display-no-host1x exposed bank2 as ordinary
+		// RAM backed by a removed-dma-pool carveout -> early-mem hang at
+		// "Freeing initrd memory" (0.616s), exactly as the comment above warns.
 		vram_reserved: vram_reserved@100000000 {
 			reg = <0x01 0x00000000 0x01 0x00000000>; // 4GB
 			no-map;
 			status = "okay";
 		};
-#endif
 
 		// (0xA0000000 attempt hung the guest silently; 0xB2000000 sits in
 		// the scanout vfio region, untouched by the loader.)

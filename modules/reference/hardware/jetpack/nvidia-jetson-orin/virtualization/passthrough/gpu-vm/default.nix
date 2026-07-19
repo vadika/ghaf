@@ -62,19 +62,36 @@ let
         base = "0x80000000";
       }
     ]
-    # GPU VRAM: dropped when GA10B is removed (display-only VM).
-    ++ lib.optional (!displayOnly) {
-      dev = "100000000.vm_cma_vram_p";
-      base = "0x100000000";
-    }
-    # 1:1 scanout carveout: nvdisplay allocates its scanout surface here and
-    # the host-owned DCE R5 DMAs it at the same PA. Mirrors scanout/scanout_p
-    # in gpu_passthrough_overlay.dts and dce_scanout in tegra234-gpuvm.dts.
-    # Only meaningful with display present.
-    ++ lib.optional (!computeOnly) {
-      dev = "b0000000.scanout_p";
-      base = "0xb0000000";
-    };
+    # GPU VRAM carveout (4GiB @ 0x100000000). Like scanout_p, this is
+    # LOAD-BEARING for the guest RAM map: the (ungated) guest memory@80000000
+    # node's bank2 is <0x1 0x0 0x1 0x0> = 0x100000000..0x200000000, backed 1:1
+    # ONLY by this carveout. Dropping it in display-no-host1x left bank2
+    # unbacked -> guest kernel panicked in early mem init before console (same
+    # class as the scanout_p bug). Keep it in every mode; a display VM never
+    # uses it as VRAM, it just backs the RAM bank the memory node already
+    # claims. Proper fix (slim the guest memory map) is a follow-up.
+    ++ [
+      {
+        dev = "100000000.vm_cma_vram_p";
+        base = "0x100000000";
+      }
+    ]
+    # 1:1 scanout carveout (128MiB @ 0xb0000000). Beyond the display scanout
+    # surface, this is LOAD-BEARING for the guest RAM map: the (ungated) guest
+    # memory@80000000 node declares bank1 as 0x80000000..0xb8000000, whose top
+    # 128MiB tail (0xb0000000..0xb8000000) is physically backed ONLY by this
+    # carveout mapped 1:1. Dropping it in compute-no-host1x left that tail
+    # unbacked, so swiotlb_init memset'd into a hole and the guest kernel
+    # panicked at start_kernel before any console (root-caused via earlycon,
+    # 2026-07-19). Keep it in every mode; the compute VM never touches it as
+    # display, it just backs the RAM the memory node already claims. Proper
+    # fix (slim the guest memory map for a display-less VM) is a follow-up.
+    ++ [
+      {
+        dev = "b0000000.scanout_p";
+        base = "0xb0000000";
+      }
+    ];
   # GPU compute engines. Neither dce@d800000 nor display@13800000 is here: the
   # host keeps the real DCE, bootstraps its R5, and the R5 drives display@13800000
   # directly. Passing display to the guest via vfio resets it and halts the R5
@@ -420,6 +437,15 @@ in
       (
         { config, pkgs, ... }:
         {
+          # DIAGNOSTIC (host1x experiment, 2026-07-19): authorize the dev-container
+          # key so the experiment harness can ssh the guest (container -> net-vm
+          # proxy -> 192.168.100.3) to run gpu-vm-load / read dmesg. The guest
+          # ghaf user otherwise ships no authorized keys. Branch-only; drop before
+          # any promotion.
+          users.users.ghaf.openssh.authorizedKeys.keys = [
+            "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIJKQ+6iZKKw0eMJbuMTIyoZ9940ecNlac6dqCpy3eiCq vadikas@c57bl6"
+          ];
+
           # DRM userspace: this nvidia-drm build has no fbdev support (it rejects
           # nvidia-drm.fbdev with "unknown parameter"), so there is no fbcon to
           # trigger a modeset -- the connector is detected with a full mode list but
@@ -645,6 +671,18 @@ in
             # with two encoders); forcing the DP encoder on stops connector detect at
             # it, so the TMDS partner -- where a passive HDMI adapter's sink actually
             # lives -- is never probed, and every EDID read fails on AUX forever.
+          ]
+          # DIAGNOSTIC (compute-no-host1x boot failure, 2026-07-19): the compute
+          # guest dies ~7s with zero ttyAMA0 output while off-mode boots fine.
+          # earlycon on the guest pl011 (stdout-path /pl011@9000000) captures the
+          # pre-console phase; keep_bootcon keeps it live past console handover.
+          # Gated to both experiments (dropHost1x) so off stays byte-identical.
+          # Remove once the gating-specific early failures are root-caused.
+          ++ lib.optionals dropHost1x [
+            "earlycon=pl011,mmio32,0x09000000"
+            "keep_bootcon"
+            "ignore_loglevel"
+            "loglevel=8"
           ];
 
           # The NVIDIA GPU drivers are out-of-tree (nvidia-oot-modules): unlike
