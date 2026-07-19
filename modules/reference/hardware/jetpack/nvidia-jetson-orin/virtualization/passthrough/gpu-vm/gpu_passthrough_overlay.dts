@@ -48,6 +48,16 @@
                     reg = <0x0 0xB0000000 0x0 0x08000000>;				// 128MB
                     status = "okay";
                 };
+                // disp-vm guest RAM carveout (1:1 GPA=HPA, like gpu-vm's vm_cma).
+                // Fills the gap between scanout (ends 0xb8000000) and gpu-vm's
+                // vram (0x100000000): 0xb8000000..0x100000000 = 1.125GB, disjoint
+                // from every gpu-vm carveout. disp-vm gets real backed RAM here
+                // instead of QEMU -m (whose virt placement doesn't match the DTB).
+                dispram: dispram@b8000000 {
+                    compatible = "removed-dma-pool";
+                    reg = <0x0 0xB8000000 0x0 0x48000000>;				// 1.125GB
+                    status = "okay";
+                };
             };
 
             // Assign the reserved memory for the VM to a dummy driver in host
@@ -82,6 +92,15 @@
                 compatible = "nvidia,dummy";
                 iommus = <&smmu_niso0 0x7d> /* concurrent: distinct group from GPU, DMA-less wrapper */;
                 reg = <0x0 0xB0000000 0x0 0x08000000>;				// 128MB
+                dma-coherent;
+                status = "okay";
+            };
+            // disp-vm RAM carveout, 1:1 vfio (mmio-base=0xb8000000). SID 0x7d ->
+            // same IOMMU group (18) as the other disp-vm wrappers, disjoint from GPU.
+            dispram_p: dispram_p@b8000000 {
+                compatible = "nvidia,dummy";
+                iommus = <&smmu_niso0 0x7d>;
+                reg = <0x0 0xB8000000 0x0 0x48000000>;				// 1.125GB
                 dma-coherent;
                 status = "okay";
             };

@@ -45,6 +45,14 @@ let
       dev = "b0000000.scanout_p";
       base = "0xb0000000";
     }
+    # disp-vm guest RAM, 1:1 GPA=HPA carveout (0xb8000000..0x100000000, 1.125GB).
+    # QEMU -m does not reliably back the guest in this passthrough setup (its virt
+    # RAM base != the DTB memory@); like gpu-vm's vm_cma, disp-vm gets real RAM
+    # from this carveout instead. Disjoint from every gpu-vm carveout.
+    {
+      dev = "b8000000.dispram_p";
+      base = "0xb8000000";
+    }
   ];
   dispCaps = [
     {
