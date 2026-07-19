@@ -33,6 +33,15 @@ let
   # reference it without the inner `config` shadow picking up the guest config.
   virt = config.ghaf.hardware.nvidia.virtualization;
 
+  # Host1x-ownership experiment (experiment/orin-two-vm-host1x). Both directions
+  # drop physical host1x + the 64MiB syncpoint shim + media engines (they move as
+  # one unit). compute-no-host1x additionally drops display/DCE; display-no-host1x
+  # additionally drops GA10B/nvgpu and forces NVKMS no-syncpt mode.
+  exp = cfg.host1xExperiment;
+  dropHost1x = exp != "off";
+  computeOnly = exp == "compute-no-host1x";
+  displayOnly = exp == "display-no-host1x";
+
   # Devices passed to gpu-vm. Reserved-memory carveouts take an explicit
   # mmio-base for 1:1 GPA=HPA; engines use the default mapping.
   reservedMem = [
@@ -165,6 +174,22 @@ in
     type = lib.types.bool;
     default = false;
     description = "Pass the Tegra234 GPU and engines through to gpu-vm on NVIDIA Orin AGX";
+  };
+
+  options.ghaf.hardware.nvidia.passthroughs.gpu_vm.host1xExperiment = lib.mkOption {
+    type = lib.types.enum [
+      "off"
+      "compute-no-host1x"
+      "display-no-host1x"
+    ];
+    default = "off";
+    description = ''
+      Branch-only host1x-ownership experiment selector (experiment/orin-two-vm-host1x).
+      "off" reproduces the validated combined-gpuvm build. "compute-no-host1x"
+      strips host1x/shim/media/display for the GPU-compute feasibility gate.
+      "display-no-host1x" strips host1x/shim/media/gpu and forces NVKMS no-syncpt
+      mode for the software-display feasibility gate. Never promote to a target.
+    '';
   };
 
   config = lib.mkIf cfg.enable {
