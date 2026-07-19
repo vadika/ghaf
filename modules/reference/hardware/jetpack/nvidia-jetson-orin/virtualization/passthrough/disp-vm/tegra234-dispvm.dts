@@ -63,8 +63,16 @@
 	// bank1 only, 0x80000000..0xb0000000 (768MB). No GPU VRAM bank2 (no
 	// GPU here). The scanout carveout at 0xb0000000 (below) is a SEPARATE
 	// 1:1 vfio mapping, outside this bank.
-	memory@80000000 {
-		reg = <0x00 0x80000000 0x00 0x30000000>;
+	// disp-vm guest RAM = plain QEMU -m emulated RAM. The QEMU `virt` machine
+	// places -m at base 0x40000000 (NOT 0x80000000 -- that only worked for
+	// gpu-vm because a vm_cma VFIO carveout backs it 1:1). disp-vm has no such
+	// carveout, so its RAM MUST be declared where -m actually lives. Use
+	// 0x40000000..0x66000000 (608MB), which sits in virt's low RAM window and
+	// below the disp_caps/disp_chan keyholes QEMU maps at 0x66230000/0x66270000.
+	// Display surfaces still live in dce_scanout@0xb0000000 (separate 1:1 vfio),
+	// unaffected by RAM placement.
+	memory@40000000 {
+		reg = <0x00 0x40000000 0x00 0x26000000>;
 		device_type = "memory";
 	};
 
