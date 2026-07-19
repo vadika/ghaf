@@ -81,10 +81,11 @@ let
   # (DCE_HALTED at dce_ss_set), so display stays host-side and unbound; the guest
   # reaches the panel only through the DCE host-proxy IPC path.
   #
-  # host1x@13e00000 is still passed: the guest GPU stack (nvgpu) needs host1x
-  # syncpoints. If the R5 still halts with display host-side, host1x is the next
-  # candidate to keep host-side (it would then cost guest GPU compute until the
-  # guest gets a virtual host1x).
+  # host1x@13e00000 is passed in off/default: the guest GPU stack (nvgpu) needs
+  # host1x syncpoints. It (+ shim + media) is dropped in BOTH host1x-ownership
+  # experiments (gated on !dropHost1x below). If the R5 still halts with display
+  # host-side, host1x is the next candidate to keep host-side (it would then cost
+  # guest GPU compute until the guest gets a virtual host1x).
   engines =
     # GA10B is dropped in the display-only VM.
     lib.optional (!displayOnly) "17000000.gpu"
