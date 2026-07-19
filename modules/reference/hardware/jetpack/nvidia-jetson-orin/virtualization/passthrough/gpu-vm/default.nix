@@ -42,6 +42,12 @@ let
   computeOnly = exp == "compute-no-host1x";
   displayOnly = exp == "display-no-host1x";
 
+  # cpp -D flags that strip guest DT nodes for the host1x experiment (Task 2).
+  expDtDefines =
+    lib.optionalString dropHost1x "-DEXP_DROP_HOST1X "
+    + lib.optionalString computeOnly "-DEXP_DROP_DISPLAY "
+    + lib.optionalString displayOnly "-DEXP_DROP_GPU ";
+
   # Devices passed to gpu-vm. Reserved-memory carveouts take an explicit
   # mmio-base for 1:1 GPA=HPA; engines use the default mapping.
   reservedMem = [
@@ -155,7 +161,7 @@ let
         # $CC is set by stdenv to the toolchain's compiler (triple-prefixed in a
         # cross build, where a bare `gcc` does not exist); -E only preprocesses,
         # so the target triple is irrelevant to the text output.
-        $CC -E -nostdinc -undef -D__DTS__ -x assembler-with-cpp \
+        $CC -E -nostdinc -undef -D__DTS__ ${expDtDefines}-x assembler-with-cpp \
           -I${mainInc} \
           -I${./nv-dt-bindings} \
           tegra234-gpuvm.dts > preprocessed.dts

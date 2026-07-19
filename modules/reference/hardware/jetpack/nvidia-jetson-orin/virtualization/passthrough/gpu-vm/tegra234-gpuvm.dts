@@ -26,7 +26,9 @@
 	compatible = "nvidia,tegra234";
 
 	aliases {
+#ifndef EXP_DROP_HOST1X
 		host1x = &host1x;
+#endif
 	};
 
 	psci {
@@ -108,11 +110,13 @@
 		// nvmap compatible: it is declared in the memory node, and without
 		// a no-map cover the kernel allocates from it at early boot and
 		// hangs before the console (learned the hard way, twice).
+#ifndef EXP_DROP_GPU
 		vram_reserved: vram_reserved@100000000 {
 			reg = <0x01 0x00000000 0x01 0x00000000>; // 4GB
 			no-map;
 			status = "okay";
 		};
+#endif
 
 		// (0xA0000000 attempt hung the guest silently; 0xB2000000 sits in
 		// the scanout vfio region, untouched by the loader.)
@@ -148,12 +152,14 @@
 		// gpu_passthrough_overlay.dts (host removed-dma-pool + vfio
 		// mmio-base=0xb0000000). Sits in the 128MB tail of the extended
 		// memory@80000000 region (0xb0000000..0xb8000000).
+#ifndef EXP_DROP_DISPLAY
 		dce_scanout: dce_scanout@b0000000 {
 			compatible = "shared-dma-pool";
 			reusable;
 			reg = <0x00 0xB0000000 0x00 0x01000000>; // 16MB (rest given to generic_carveout)
 			status = "okay";
 		};
+#endif
 	};
 
 
@@ -220,6 +226,7 @@
 		};
 
 
+#ifndef EXP_DROP_DISPLAY
 		display: display@13800000 {
 			compatible = "nvidia,tegra234-display";
 			power-domains = <&bpmp TEGRA234_POWER_DOMAIN_DISP>;
@@ -928,8 +935,10 @@
 				dma-coherent;
 			};
 		};
+#endif
 
 
+#ifndef EXP_DROP_GPU
 		ga10b: gpu@17000000 {
 			compatible = "nvidia,ga10b";
 			reg = <0x0 0x17000000 0x0 0x01000000>,
@@ -955,6 +964,7 @@
 
 			status = "okay";
 		};
+#endif
 
 		// We need to keep fuse here disable without passing
 		// through in order the display works
@@ -977,6 +987,7 @@
 		};
 
 
+#ifndef EXP_DROP_HOST1X
 		host1x: host1x@13e00000 {
 			compatible = "nvidia,tegra234-host1x";
 			reg = <0x0 0x13e00000 0x0 0x10000>,
@@ -1113,6 +1124,7 @@
 				status = "okay";
 			};
 		};
+#endif
 
 
 
