@@ -48,14 +48,22 @@
                     reg = <0x0 0xB0000000 0x0 0x08000000>;				// 128MB
                     status = "okay";
                 };
-                // disp-vm guest RAM carveout (1:1 GPA=HPA, like gpu-vm's vm_cma).
-                // Fills the gap between scanout (ends 0xb8000000) and gpu-vm's
-                // vram (0x100000000): 0xb8000000..0x100000000 = 1.125GB, disjoint
-                // from every gpu-vm carveout. disp-vm gets real backed RAM here
-                // instead of QEMU -m (whose virt placement doesn't match the DTB).
-                dispram: dispram@b8000000 {
+                // disp-vm guest RAM = SPLIT carveout (1:1 GPA=HPA, like gpu-vm's
+                // vm_cma). LOW bank holds the kernel/initrd + 672MB normal RAM +
+                // 64MB CMA (QEMU -M virt loads the kernel low; all-high -> kill
+                // init). HIGH bank (>4GB) holds the GPU-style carveouts, so the
+                // low bank stays 672MB normal (the working 1.125GB config's value;
+                // a single 768MB low bank left only ~288MB normal -> init SIGSEGV).
+                // The DMA32 hole 0xe6000000..0x100000000 (416MB) is left to the
+                // host so 14100000.pcie's MSI page allocates -> WLAN/net-vm live.
+                dispram_lo: dispram_lo@b8000000 {
                     compatible = "removed-dma-pool";
-                    reg = <0x0 0xB8000000 0x0 0x48000000>;				// 1.125GB
+                    reg = <0x0 0xB8000000 0x0 0x2E000000>;				// 736MB (0xb8..0xe6)
+                    status = "okay";
+                };
+                dispram_hi: dispram_hi@200000000 {
+                    compatible = "removed-dma-pool";
+                    reg = <0x2 0x00000000 0x0 0x1A000000>;				// 416MB @ 8GB (0x200..0x21a)
                     status = "okay";
                 };
             };
@@ -95,12 +103,19 @@
                 dma-coherent;
                 status = "okay";
             };
-            // disp-vm RAM carveout, 1:1 vfio (mmio-base=0xb8000000). SID 0x7d ->
-            // same IOMMU group (18) as the other disp-vm wrappers, disjoint from GPU.
-            dispram_p: dispram_p@b8000000 {
+            // disp-vm RAM carveout, 1:1 vfio (mmio-base=0x200000000). SID 0x7d ->
+            // same IOMMU group as the other disp-vm wrappers, disjoint from GPU.
+            dispram_lo_p: dispram_lo_p@b8000000 {
                 compatible = "nvidia,dummy";
                 iommus = <&smmu_niso0 0x7d>;
-                reg = <0x0 0xB8000000 0x0 0x48000000>;				// 1.125GB
+                reg = <0x0 0xB8000000 0x0 0x2E000000>;				// 736MB
+                dma-coherent;
+                status = "okay";
+            };
+            dispram_hi_p: dispram_hi_p@200000000 {
+                compatible = "nvidia,dummy";
+                iommus = <&smmu_niso0 0x7d>;
+                reg = <0x2 0x00000000 0x0 0x1A000000>;				// 416MB @ 8GB
                 dma-coherent;
                 status = "okay";
             };

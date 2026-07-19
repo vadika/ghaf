@@ -50,8 +50,12 @@ let
     # RAM base != the DTB memory@); like gpu-vm's vm_cma, disp-vm gets real RAM
     # from this carveout instead. Disjoint from every gpu-vm carveout.
     {
-      dev = "b8000000.dispram_p";
+      dev = "b8000000.dispram_lo_p";
       base = "0xb8000000";
+    }
+    {
+      dev = "200000000.dispram_hi_p";
+      base = "0x200000000";
     }
   ];
   dispCaps = [
@@ -134,12 +138,28 @@ in
           d:
           "${pkgs.bash}/bin/bash -c \"echo vfio-platform > /sys/bus/platform/devices/${d}/driver_override\""
         ) allDevs;
+        # Idempotent bind: only bind a device not already on vfio-platform.
+        # A blanket "|| true" would mask a genuinely missing device; this skips
+        # the already-bound case (re-bind writes EBUSY) while still failing hard
+        # if the device is absent (driver symlink stays non-vfio-platform).
         ExecStart = map (
-          d: "${pkgs.bash}/bin/bash -c \"echo ${d} > /sys/bus/platform/drivers/vfio-platform/bind\""
+          d:
+          "${pkgs.bash}/bin/bash -c '"
+          + "cur=$(basename \"$(readlink -f /sys/bus/platform/devices/${d}/driver 2>/dev/null)\"); "
+          + "if [ \"$cur\" != vfio-platform ]; then echo ${d} > /sys/bus/platform/drivers/vfio-platform/bind; fi'"
         ) allDevs;
       };
     };
-    systemd.services."microvm@disp-vm".after = [ "bindDispVm.service" ];
+    # Requires (not just after): after= alone never STARTS the bind service, so
+    # a manual/socket start of the VM could race past unbound devices.
+    systemd.services."microvm@disp-vm" = {
+      after = [ "bindDispVm.service" ];
+      requires = [ "bindDispVm.service" ];
+      # disp-vm is the DCE display owner: opt in to the QEMU DCE bridge so it
+      # (and only it, among the display-less VMs) opens /dev/dce-host. See the
+      # GHAF_DCE_GUEST gate in ghaf-qemu-bpmp patch 0002.
+      environment.GHAF_DCE_GUEST = "1";
+    };
 
     # Guest configuration for the disp-vm microvm: the proven
     # display-no-host1x guest (Exp B, hardware-validated 2026-07-19) --

@@ -436,7 +436,15 @@ in
         ) allDevs;
       };
     };
-    systemd.services."microvm@gpu-vm".after = [ "bindGpuVm.service" ];
+    systemd.services."microvm@gpu-vm" = {
+      after = [ "bindGpuVm.service" ];
+      # Exclusive DCE ownership (opt-in): the QEMU DCE bridge is created only
+      # when GHAF_DCE_GUEST=1 (ghaf-qemu-bpmp patch 0002). A display-capable
+      # GPU-VM (display NOT dropped) owns DCE, so it opts in. A display-less
+      # GPU-VM (compute-no-host1x / compute-with-host1x) leaves it unset -> never opens
+      # /dev/dce-host, so it cannot steal disp-vm's DCE events.
+      environment = lib.mkIf (!dropDisplay) { GHAF_DCE_GUEST = "1"; };
+    };
 
     # Host DT overlay exposing the GPU nodes to passthrough.
     hardware.deviceTree.overlays = [
