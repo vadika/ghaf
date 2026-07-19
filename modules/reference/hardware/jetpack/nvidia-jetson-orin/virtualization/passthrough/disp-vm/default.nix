@@ -177,13 +177,6 @@ in
       (
         { config, pkgs, ... }:
         {
-          # DIAGNOSTIC (host1x experiment): authorize the dev-container key so
-          # the experiment harness can ssh the guest. Branch-only; drop before
-          # any promotion. Same key as gpu-vm's diagnostic.
-          users.users.ghaf.openssh.authorizedKeys.keys = [
-            "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIJKQ+6iZKKw0eMJbuMTIyoZ9940ecNlac6dqCpy3eiCq vadikas@c57bl6"
-          ];
-
           # NVIDIA/Jetson graphics userspace (EGL/GLES/GBM) via
           # /run/opengl-driver, mirroring ../gpu-vm/default.nix and
           # jetpack-nixos modules/graphics.nix.
@@ -271,13 +264,6 @@ in
             "log_buf_len=16M"
             "drm.vblankoffdelay=0"
             "nvidia-drm.fbdev=1"
-            # DIAGNOSTIC (host1x experiment): earlycon on the guest pl011
-            # captures the pre-console boot phase. Branch-only; drop before
-            # promotion.
-            "earlycon=pl011,mmio32,0x09000000"
-            "keep_bootcon"
-            "ignore_loglevel"
-            "loglevel=8"
           ];
 
           boot.extraModulePackages = [ config.boot.kernelPackages.nvidia-oot-modules ];

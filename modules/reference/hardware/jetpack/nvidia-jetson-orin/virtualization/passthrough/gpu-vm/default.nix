@@ -459,15 +459,6 @@ in
       (
         { config, pkgs, ... }:
         {
-          # DIAGNOSTIC (host1x experiment, 2026-07-19): authorize the dev-container
-          # key so the experiment harness can ssh the guest (container -> net-vm
-          # proxy -> 192.168.100.3) to run gpu-vm-load / read dmesg. The guest
-          # ghaf user otherwise ships no authorized keys. Branch-only; drop before
-          # any promotion.
-          users.users.ghaf.openssh.authorizedKeys.keys = [
-            "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIJKQ+6iZKKw0eMJbuMTIyoZ9940ecNlac6dqCpy3eiCq vadikas@c57bl6"
-          ];
-
           # DRM userspace: this nvidia-drm build has no fbdev support (it rejects
           # nvidia-drm.fbdev with "unknown parameter"), so there is no fbcon to
           # trigger a modeset -- the connector is detected with a full mode list but
@@ -693,19 +684,6 @@ in
             # with two encoders); forcing the DP encoder on stops connector detect at
             # it, so the TMDS partner -- where a passive HDMI adapter's sink actually
             # lives -- is never probed, and every EDID read fails on AUX forever.
-          ]
-          # DIAGNOSTIC (compute-no-host1x boot failure, 2026-07-19): the compute
-          # guest dies ~7s with zero ttyAMA0 output while off-mode boots fine.
-          # earlycon on the guest pl011 (stdout-path /pl011@9000000) captures the
-          # pre-console phase; keep_bootcon keeps it live past console handover.
-          # Gated to any experiment value (exp != off) so off stays byte-identical
-          # -- includes compute-with-host1x, whose bank1 shrink risks swiotlb
-          # placement and wants console visibility. Remove before promotion.
-          ++ lib.optionals (exp != "off") [
-            "earlycon=pl011,mmio32,0x09000000"
-            "keep_bootcon"
-            "ignore_loglevel"
-            "loglevel=8"
           ];
 
           # The NVIDIA GPU drivers are out-of-tree (nvidia-oot-modules): unlike
