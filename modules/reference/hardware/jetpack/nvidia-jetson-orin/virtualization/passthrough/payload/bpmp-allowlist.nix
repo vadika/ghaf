@@ -19,12 +19,19 @@
     167
     236
     304
+    # Engine-dedicated NAFLL DVFS muxes reached by clk_prepare. They source
+    # from protected OSC/PLLP roots, so this adds no mutable host surface.
+    199 # NAFLL_NVDEC
+    207 # NAFLL_VIC
+    210 # NAFLL_NVJPG1
   ]
   # display@13800000 clocks
   ++ [
     # SOR root parents
     14 # TEGRA234_CLK_CLK_M
     102 # TEGRA234_CLK_PLLP_OUT0
+    131 # SOR_SAFE: dpaux(19) parent
+    328 # PLLP_DIV17: fixed /17 tap feeding SOR_SAFE
     19
     40
     71

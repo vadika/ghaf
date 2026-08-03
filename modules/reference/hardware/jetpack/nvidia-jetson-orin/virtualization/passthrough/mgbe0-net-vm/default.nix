@@ -67,11 +67,12 @@ in
         368 # UPHY_GBE_PLL2_XDIG
         # mgbe0_app (380) does not hang off the GBE PLLs at all: it is clocked
         # at 480 MHz from the USB/UTMI tree, so clk_prepare walks
-        # mgbe0_app -> utmipll_clkout480 -> utmip_pll -> osc/clk_m. Every one of
-        # these is shared with host USB, so bpmp-host-proxy.c also lists them in
-        # protected_clk_roots: net-vm may enable and read them, but
-        # disable/set_rate/set_parent stay denied, so a guest cannot pull the
-        # clock out from under the host's USB (keyboard, net-vm's own NIC).
+        # mgbe0_app -> mgbes_app -> utmipll_clkout480 -> utmip_pll -> osc/clk_m.
+        # Every one of these is shared with host USB, so bpmp-host-proxy.c
+        # also lists them in protected_clk_roots: net-vm may enable and read
+        # them, but disable/set_rate/set_parent stay denied, so a guest
+        # cannot pull the clock out from under the host's USB (keyboard,
+        # net-vm's own NIC).
         103 # UTMIP_PLL
         292 # UTMIPLL_CLKOUT480
         91 # OSC
