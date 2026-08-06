@@ -2,14 +2,17 @@
 # SPDX-License-Identifier: Apache-2.0
 {
   config,
+  inputs,
   lib,
   pkgs,
   ...
 }:
 let
   cfg = config.ghaf.virtualization.gpuPartitionManager;
-  manager = pkgs.callPackage ../../../packages/gpu-vm-partition-manager/package.nix {
-    inherit (pkgs) nvidia-jetpack;
+  manager = inputs.gpu-partition-manager.lib.mkManager {
+    inherit pkgs;
+    cudaHeaders = pkgs.nvidia-jetpack.cudaPackages.cuda_cudart;
+    cudaDriver = pkgs.nvidia-jetpack.l4t-cuda;
   };
   probe = pkgs.callPackage ../../../packages/gpu-vm-green-context-probe/package.nix {
     inherit (pkgs) nvidia-jetpack;

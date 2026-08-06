@@ -385,6 +385,27 @@
         "type": "github"
       }
     },
+    "gpu-partition-manager": {
+      "inputs": {
+        "nixpkgs": [
+          "nixpkgs"
+        ]
+      },
+      "locked": {
+        "lastModified": 1786047424,
+        "narHash": "sha256-lX4FYmO3obHgmEtrREXISFUYVdeobxvZH6Sy+wjRzTE=",
+        "ref": "refs/pull/1/head",
+        "rev": "55a8e43db1b88492d8d19b550827e6721f668377",
+        "revCount": 2,
+        "type": "git",
+        "url": "https://github.com/tiiuae/ghaf-gpu-partition-manager.git"
+      },
+      "original": {
+        "ref": "refs/pull/1/head",
+        "type": "git",
+        "url": "https://github.com/tiiuae/ghaf-gpu-partition-manager.git"
+      }
+    },
     "jetpack-nixos": {
       "inputs": {
         "cuda-legacy": "cuda-legacy",
@@ -578,6 +599,7 @@
         "git-hooks-nix": "git-hooks-nix",
         "givc": "givc",
         "gp-gui": "gp-gui",
+        "gpu-partition-manager": "gpu-partition-manager",
         "jetpack-nixos": "jetpack-nixos",
         "microvm": "microvm",
         "nix-store-veritysetup-generator": "nix-store-veritysetup-generator",
