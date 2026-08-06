@@ -15,15 +15,20 @@
   inputs,
   globalConfig,
   hostConfig,
+  config,
   ...
 }:
 let
   vmName = "gpu-vm";
   timezoneEnabled = lib.ghaf.features.isEnabledFor globalConfig "timezone" vmName;
+  partitionCfg = config.ghaf.virtualization.gpuPartitionManager;
 
   # Prebuilt CUDA smoke test (driver API + embedded PTX, RPATH-wired to native
   # libcuda); also the payload of the container smoke image.
   gpuVmLoad = pkgs.callPackage ../../../packages/gpu-vm-load/package.nix {
+    inherit (pkgs) nvidia-jetpack;
+  };
+  partitionManager = pkgs.callPackage ../../../packages/gpu-vm-partition-manager/package.nix {
     inherit (pkgs) nvidia-jetpack;
   };
 
@@ -37,12 +42,16 @@ let
       {
         nativeBuildInputs = [ pkgs.buildPackages.jq ];
         closureInfo = pkgs.closureInfo { rootPaths = [ pkgs.nvidia-jetpack.l4t-cuda ]; };
+        managedClosureInfo = pkgs.closureInfo { rootPaths = [ partitionManager ]; };
         libPath = lib.makeLibraryPath [ pkgs.nvidia-jetpack.l4t-cuda ];
       }
       ''
         jq -n \
           --rawfile paths "$closureInfo/store-paths" \
+          --rawfile managedPaths "$managedClosureInfo/store-paths" \
           --arg libPath "$libPath" \
+          --arg managed ${lib.boolToString partitionCfg.enable} \
+          --arg client ${partitionManager}/bin/gpu-partition-run \
           '{
             cdiVersion: "0.6.0",
             kind: "nvidia.com/gpu",
@@ -88,7 +97,33 @@ let
                   )
                 }
               }
-            ],
+            ] + (if $managed == "true" then [
+              {
+                name: "managed",
+                containerEdits: {
+                  env: [ "GPU_PARTITION_SOCKET=/run/gpu-partition-manager/control.sock" ],
+                  mounts: (
+                    ((($managedPaths | split("\n") | map(select(length > 0)))
+                      - ($paths | split("\n") | map(select(length > 0)))) | map({
+                      hostPath: .,
+                      containerPath: .,
+                      options: [ "ro", "bind", "nosuid", "nodev" ]
+                    })) + [
+                      {
+                        hostPath: $client,
+                        containerPath: "/opt/ghaf/bin/gpu-partition-run",
+                        options: [ "ro", "bind", "nosuid", "nodev" ]
+                      },
+                      {
+                        hostPath: "/run/gpu-partition-manager/control.sock",
+                        containerPath: "/run/gpu-partition-manager/control.sock",
+                        options: [ "bind" ]
+                      }
+                    ]
+                  )
+                }
+              }
+            ] else [] end),
             containerEdits: {
               # ponytail: this env edit clobbers any image-provided LD_LIBRARY_PATH;
               # switch to an ldconfig-hook approach if third-party images matter.
@@ -127,6 +162,45 @@ let
       echo CONTAINER_GPU_OK
     '';
   };
+
+  gpuManagedSmokeImage = pkgs.dockerTools.buildImage {
+    name = "gpu-managed-smoke";
+    tag = "latest";
+    copyToRoot = pkgs.buildEnv {
+      name = "gpu-managed-smoke-root";
+      paths = [
+        pkgs.busybox
+        gpuVmLoad
+      ];
+      pathsToLink = [ "/bin" ];
+    };
+    config.Cmd = [
+      "/bin/sh"
+      "-c"
+      ''
+        test ! -e /dev/nvgpu
+        test ! -e /dev/nvhost-gpu
+        if /bin/gpu-vm-load 1; then
+          echo MANAGED_GPU_NODE_LEAK
+          exit 1
+        fi
+        /opt/ghaf/bin/gpu-partition-run status
+        /opt/ghaf/bin/gpu-partition-run burn --seconds 5
+        echo MANAGED_CONTAINER_GPU_OK
+      ''
+    ];
+  };
+
+  gpuPartitionContainerSmoke = pkgs.writeShellApplication {
+    name = "gpu-partition-container-smoke";
+    runtimeInputs = [ pkgs.docker ];
+    text = ''
+      docker load < ${gpuManagedSmokeImage}
+      docker run --rm --device nvidia.com/gpu=managed \
+        gpu-managed-smoke:latest | grep MANAGED_CONTAINER_GPU_OK
+      echo MANAGED_CDI_OK
+    '';
+  };
 in
 {
   _file = ./gpuvm-base.nix;
@@ -137,6 +211,7 @@ in
     inputs.self.nixosModules.hardware-x86_64-guest-kernel
     inputs.self.nixosModules.vm-modules
     inputs.self.nixosModules.profiles
+    ./gpuvm-partition-manager.nix
   ];
 
   ghaf = {
@@ -261,7 +336,8 @@ in
       # libcuda), built at image time since the guest can't compile on-device.
       gpuVmLoad
       gpuContainerSmoke
-    ];
+    ]
+    ++ lib.optional partitionCfg.enable gpuPartitionContainerSmoke;
 
   # GPU nodes are created root-only at early nvgpu load, before udev rules
   # reliably apply, so a rule alone leaves them root:root. Re-grant video-group

@@ -24,6 +24,21 @@ let
   mkOrinGpuDtb = import ../payload/dtb.nix;
   mkOrinGpuGuestModule = import ../payload/guest-module.nix;
 
+  supportedPartitionSoM = lib.elem config.ghaf.hardware.nvidia.orin.somType [
+    "agx"
+    "agx64"
+    "agx-industrial"
+    "nx"
+  ];
+  mkPartitionPlugin =
+    pluginName: pluginSource:
+    pkgs.callPackage ../../../../../../../../packages/gpu-vm-partition-manager/plugin.nix {
+      inherit (pkgs) nvidia-jetpack;
+      inherit pluginName pluginSource;
+    };
+  burnPlugin = mkPartitionPlugin "burn" ../../../../../../../../packages/gpu-vm-partition-manager/plugins/burn.c;
+  latencyPlugin = mkPartitionPlugin "latency" ../../../../../../../../packages/gpu-vm-partition-manager/plugins/latency.c;
+
   gpuvm-dtb = mkOrinGpuDtb {
     inherit lib pkgs board;
     cap = capabilities.gpuvm;
@@ -33,10 +48,32 @@ in
 {
   _file = ./default.nix;
 
-  options.ghaf.hardware.nvidia.passthroughs.gpu_vm.enable = lib.mkOption {
-    type = lib.types.bool;
-    default = false;
-    description = "Pass the Tegra234 GPU and engines through to gpu-vm on NVIDIA Orin AGX";
+  options.ghaf.hardware.nvidia.passthroughs.gpu_vm = {
+    enable = lib.mkOption {
+      type = lib.types.bool;
+      default = false;
+      description = "Pass the Tegra234 GPU and engines through to gpu-vm on NVIDIA Orin AGX or NX";
+    };
+
+    partitionManager = {
+      enable = lib.mkOption {
+        type = lib.types.bool;
+        default = config.ghaf.profiles.debug.enable && supportedPartitionSoM;
+        description = ''
+          Enable the cooperative CUDA Green Context job manager in gpu-vm.
+          Debug AGX and NX split-VM configurations enable it by default.
+        '';
+      };
+
+      plugins = lib.mkOption {
+        type = lib.types.listOf lib.types.package;
+        default = [
+          burnPlugin
+          latencyPlugin
+        ];
+        description = "Trusted Nix-built workload plugins loaded by gpu-partition-manager.";
+      };
+    };
   };
 
   config = lib.mkIf cfg.enable {
@@ -48,6 +85,10 @@ in
       {
         assertion = !config.ghaf.hardware.nvidia.virtualization.bpmpAllowAllDomains;
         message = "gpu_vm passthrough requires the closed BPMP allow-list; ghaf.hardware.nvidia.virtualization.bpmpAllowAllDomains must stay false.";
+      }
+      {
+        assertion = !cfg.partitionManager.enable || supportedPartitionSoM;
+        message = "gpu_vm partitionManager is supported only on NVIDIA Orin AGX and NX";
       }
     ];
 
@@ -117,6 +158,11 @@ in
         inherit (payload) vfioArgs;
         inherit (virt) sourcesPatch;
       })
+      {
+        ghaf.virtualization.gpuPartitionManager = {
+          inherit (cfg.partitionManager) enable plugins;
+        };
+      }
     ];
   };
 }
