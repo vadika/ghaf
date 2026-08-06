@@ -258,7 +258,11 @@ int main(int argc, char **argv) {
   int index = 1;
 
   while (index < argc) {
-    if (strcmp(argv[index], "--socket") == 0 && index + 1 < argc) {
+    if (strcmp(argv[index], "--help") == 0 ||
+        strcmp(argv[index], "-h") == 0) {
+      usage(stdout, argv[0]);
+      return EXIT_SUCCESS;
+    } else if (strcmp(argv[index], "--socket") == 0 && index + 1 < argc) {
       socket_path = argv[index + 1];
       index += 2;
     } else if (strcmp(argv[index], "--slot") == 0 && index + 1 < argc) {

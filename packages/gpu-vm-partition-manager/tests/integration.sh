@@ -5,6 +5,8 @@ set -euo pipefail
 
 socket="$PWD/control.sock"
 manager_log="$PWD/manager.log"
+./gpu-partition-run --help | grep 'cancel JOB_ID'
+
 ./gpu-partition-manager --socket "$socket" --plugin "$PWD/mock-plugin.so" \
   >"$manager_log" 2>&1 &
 manager_pid=$!
