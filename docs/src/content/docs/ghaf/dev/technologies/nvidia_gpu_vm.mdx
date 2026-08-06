@@ -1,10 +1,10 @@
 ---
-title: NVIDIA Jetson AGX Orin GPU Passthrough to gpu-vm
+title: NVIDIA Jetson Orin GPU Passthrough to gpu-vm
 sidebar:
   label: GPU Passthrough to gpu-vm
 ---
 
-The AGX Orin's integrated GPU (`ga10b`, `gpu@17000000`) and its host1x
+The Orin AGX or NX integrated GPU (`ga10b`, `gpu@17000000`) and its host1x
 multimedia engines are passed through to a dedicated `gpu-vm` microVM, so CUDA
 compute runs in an isolated guest instead of on the host. It coexists with the
 MGBE0 ethernet passthrough (`net-vm`), sharing the same BPMP-virtualisation and
@@ -13,10 +13,10 @@ MGBE0 ethernet passthrough (`net-vm`), sharing the same BPMP-virtualisation and
 import { Aside } from "@astrojs/starlight/components";
 
 <Aside>
-  Verified on the NVIDIA Jetson AGX Orin devkit. The guest binds `gk20a`,
+  Verified on the NVIDIA Jetson AGX Orin devkit. The AGX and NX split targets
+  use the same runtime-query-based GPU payload. The guest binds `gk20a`,
   creates `/dev/nvgpu/igpu0`, and CUDA `cuInit` succeeds —
-  `__nvcc_device_query` returns `87` (sm_87 / ga10b). AGX Orin only: the GPU is
-  enabled per-SoM, never in the shared `orin.nix`.
+  `__nvcc_device_query` returns `87` (sm_87 / ga10b).
 </Aside>
 
 <Aside>
@@ -118,10 +118,12 @@ is handed to vfio.
 
 ## Use
 
-### Enable (per-SoM, AGX only)
+For cooperative CUDA SM job placement and managed containers, see
+[Managed GPU Partitions](/ghaf/dev/technologies/nvidia_gpu_partitioning/).
 
-Set in the AGX SoM files (`orin-agx.nix`, `orin-agx64.nix`,
-`orin-agx-industrial.nix`):
+### Enable per SoM
+
+Set in the AGX or NX SoM module:
 
 ```nix
 ghaf.hardware.nvidia.passthroughs.gpu_vm.enable = true;

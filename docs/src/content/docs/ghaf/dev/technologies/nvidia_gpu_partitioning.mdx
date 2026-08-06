@@ -1,0 +1,331 @@
+---
+title: Managed GPU Partitions on NVIDIA Jetson Orin
+sidebar:
+  label: Managed GPU Partitions
+---
+
+import { Aside, Tabs, TabItem } from "@astrojs/starlight/components";
+
+Ghaf can divide the CUDA streaming multiprocessor (SM) resource in the
+split-VM `gpu-vm` into two equal [CUDA Green Contexts][green-contexts]. A small
+manager in `gpu-vm` owns both contexts and runs trusted, Nix-built workloads on
+their streams. Native processes and containers use the same manager protocol.
+
+This feature targets NVIDIA Jetson Orin AGX and Orin NX. It does not change the
+physical GPU ownership: the complete GA10B GPU remains assigned to one
+`gpu-vm`, while `disp-vm` remains the display owner.
+
+<Aside type="caution">
+  Green Contexts select SM resources, but NVIDIA does not guarantee concurrent
+  execution, forward progress, fault containment, memory-bandwidth isolation,
+  or security isolation between them. Treat this manager as cooperative job
+  placement, not as a tenant security boundary.
+</Aside>
+
+## Architecture
+
+```text
+                         gpu-vm
+
+  native client                         managed container
+  gpu-partition-run                     /opt/ghaf/bin/gpu-partition-run
+           |                                       |
+           +--------------- AF_UNIX ---------------+
+                           SOCK_SEQPACKET
+                                  |
+                  /run/gpu-partition-manager/
+                          control.sock
+                                  |
+                     gpu-partition-manager
+                    owns CUDA primary context
+                         /               \
+                  slot 0 worker       slot 1 worker
+                  Green Context       Green Context
+                  half of SMs         half of SMs
+                         \               /
+                         passed-through GA10B
+```
+
+The daemon performs these operations at startup:
+
+1. Initialize CUDA device 0 and retain its primary context.
+2. Query `CU_DEV_RESOURCE_TYPE_SM` from the driver.
+3. Require a total SM count that can form two equal, even groups.
+4. Split the resource into two groups with no remainder.
+5. Create one Green Context and one persistent worker thread per group.
+6. Query each Green Context and reject any resource mismatch.
+7. Load only the plugin store paths supplied by the Nix configuration.
+8. Create the control socket and report `GPU_PARTITION_MANAGER_READY`.
+
+The validated AGX resource is 16 SMs and produces an 8+8 split. An NX with an
+8-SM resource produces 4+4. The daemon always trusts the runtime CUDA query,
+not a board-name table. It exits with status 78 and systemd suppresses restarts
+if the geometry is unsupported.
+
+## Access Modes
+
+The static Container Device Interface (CDI) specification exposes two device
+names under `nvidia.com/gpu`:
+
+| CDI device | GPU device nodes | Manager socket | Intended use |
+| --- | --- | --- | --- |
+| `nvidia.com/gpu=all` | Yes | No | Existing unrestricted CUDA applications |
+| `nvidia.com/gpu=managed` | No | Yes | Trusted jobs submitted to a managed slot |
+
+The unrestricted device preserves compatibility with PR #2095. It also means
+that a process using `gpu=all` can bypass the manager and interfere with both
+managed slots. Do not advertise the managed path as enforced system-wide
+partitioning while `gpu=all` remains available.
+
+The managed CDI edit mounts the client at
+`/opt/ghaf/bin/gpu-partition-run`, mounts its Nix closure, and bind-mounts the
+manager socket. It intentionally injects no `/dev/nvgpu`, `/dev/nvhost-*`,
+`/dev/nvmap`, render, or host1x-fence device.
+
+## Configuration
+
+Debug split-VM configurations enable the manager by default for AGX, AGX64,
+AGX Industrial, and NX. Release configurations leave it disabled.
+
+Set the host-side option explicitly when a product configuration needs to
+override the default:
+
+```nix
+ghaf.hardware.nvidia.passthroughs.gpu_vm.partitionManager = {
+  enable = true;
+  plugins = [
+    myBurnPlugin
+    myLatencyPlugin
+  ];
+};
+```
+
+The option has an effect only when
+`ghaf.hardware.nvidia.passthroughs.gpu_vm.enable` selects the split `gpu-vm`.
+It is not enabled for the combined accelerated `gui-vm` topology.
+
+### Plugin Package Contract
+
+Every entry in `plugins` must be a trusted Nix package with:
+
+- a `gpuPartitionPluginName` passthru attribute;
+- exactly one shared object at
+  `lib/gpu-partition-manager/plugin.so`; and
+- the ABI-v1 `gpm_plugin_get_v1` entry point.
+
+The entry point returns this interface:
+
+```c
+struct gpm_plugin_v1 {
+  uint32_t abi_version;
+  const char *name;
+  const char *summary;
+  int (*run)(CUstream stream, unsigned int sm_count,
+             int argc, const char *const *argv,
+             const volatile sig_atomic_t *cancelled,
+             char *report, size_t report_size);
+};
+```
+
+The worker makes the matching Green Context current and passes its stream to
+the plugin. A plugin must launch all work on that stream, check `cancelled`
+between bounded pieces of work, validate every argument, and return a short
+machine-readable report. It must not create a primary context, switch devices,
+or assume that its SM group owns memory bandwidth or engines.
+
+The daemon uses `dlopen()` only on the exact Nix store paths generated by the
+module. It rejects duplicate names, missing entry points, and ABI mismatches.
+It does not accept uploaded PTX or runtime plugin paths through the socket.
+
+Two built-in plugins demonstrate the contract:
+
+- `burn [--seconds 1..3600]` repeatedly runs and validates a deterministic
+  CUDA kernel.
+- `latency [--iterations 1..1000000]` reports p50, p95, p99, and maximum
+  kernel launch-to-completion latency in nanoseconds.
+
+## User Commands
+
+The client uses `/run/gpu-partition-manager/control.sock` by default. Use
+`--socket PATH` only for development tests.
+
+```bash
+# Show configured plugins and descriptions.
+gpu-partition-run list
+
+# Show the queried geometry, active slots, queues, and total jobs.
+gpu-partition-run status
+
+# Select the least-loaded slot. Ties select slot 0.
+gpu-partition-run burn --seconds 60
+
+# Pin a job to a specific slot.
+gpu-partition-run --slot 1 latency --iterations 10000
+
+# Request cancellation from another terminal.
+gpu-partition-run cancel JOB_ID
+```
+
+The client prints the assigned job ID, slot, and SM count before waiting for
+the final plugin report. `Ctrl+C` and `SIGTERM` send a cancellation request.
+The client exits with status 0 on success, 130 after cancellation, and nonzero
+for protocol, plugin, CUDA, and configuration errors.
+
+The scheduler runs one job per slot. It accepts at most 16 running and queued
+jobs across both slots. An explicit slot uses that slot's FIFO. Automatic
+placement selects the idle slot or the shorter queue, with slot 0 winning a
+tie. Disconnecting a waiting client cancels its job.
+
+## Container Commands
+
+<Tabs>
+  <TabItem label="Managed">
+
+```bash
+docker run --rm --device nvidia.com/gpu=managed IMAGE \
+  /opt/ghaf/bin/gpu-partition-run burn --seconds 60
+```
+
+The v1 managed interface expects the process in the rootful container to run as
+root so it can connect to the group-restricted socket. The workload itself runs
+inside the trusted manager process, not inside the container process.
+
+  </TabItem>
+  <TabItem label="Unrestricted">
+
+```bash
+docker run --rm --device nvidia.com/gpu=all IMAGE
+```
+
+This mode injects the complete CUDA device set and L4T driver closure. The
+container initializes CUDA directly and does not receive a managed slot.
+
+  </TabItem>
+</Tabs>
+
+Run the packaged end-to-end checks in `gpu-vm`:
+
+```bash
+# Existing direct-device CDI check.
+gpu-container-smoke
+
+# Verifies socket injection, absence of GPU nodes, direct-CUDA rejection,
+# status, and a managed burn job.
+gpu-partition-container-smoke
+```
+
+## Protocol Reference
+
+The client and daemon communicate over local `AF_UNIX` `SOCK_SEQPACKET`. Every
+frame begins with a native-endian v1 header:
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `magic` | `uint32_t` | `GPM1` (`0x314d5047` on little-endian Orin) |
+| `version` | `uint16_t` | Protocol version 1 |
+| `opcode` | `uint16_t` | Operation listed below |
+| `payload_length` | `uint32_t` | Bytes after the header, at most 4096 |
+| `request_id` | `uint64_t` | Client-selected response correlation ID |
+
+Supported operations are `LIST`, `STATUS`, `RUN`, and `CANCEL`. A successful
+`RUN` first returns `RUN_ACCEPTED` with the job ID, slot, and SM count, then
+returns `RUN_RESULT` with the terminal status and report. Other operations
+return one `RESPONSE`.
+
+The v1 `RUN` request carries a slot (`auto`, 0, or 1), a plugin name, and up to
+32 NUL-separated UTF-8 arguments occupying at most 1024 bytes. The daemon
+rejects bad magic, unsupported versions, length mismatches, unterminated names,
+malformed argument vectors, unknown opcodes, unknown plugins, invalid slots,
+and full queues.
+
+Statuses distinguish invalid input, missing plugins or jobs, a full queue,
+cancellation, plugin failure, CUDA failure, and internal failure. Any plugin
+CUDA failure stops the daemon. Systemd then reconstructs both Green Contexts
+from the primary context before accepting more work.
+
+## Service Operation
+
+```bash
+systemctl status gpu-partition-manager
+journalctl -u gpu-partition-manager -b
+gpu-partition-run status
+```
+
+The service starts after `gpu-vm-node-access.service` and runs as the dedicated
+`gpu-partition` system user with `video` group access. The `ghaf` user belongs
+to the `gpu-partition` group. The service uses a private temporary directory,
+a read-only system view, no new privileges, and an `AF_UNIX`-only socket
+policy. Its runtime directory and socket are group-restricted.
+
+Important log records include:
+
+```text
+plugin=burn summary=... path=/nix/store/.../plugin.so
+device=... total_sm_count=16 slots=2 slot_sm_count=8 remainder=0
+GPU_PARTITION_MANAGER_READY socket=... plugins=2
+```
+
+### Troubleshooting
+
+- If the service exits with status 78, inspect the CUDA device count, total SM
+  count, equal split, remainder, and Green Context readback in the journal.
+  Systemd intentionally does not restart configuration failures.
+- If it repeatedly restarts, find the first `fatal CUDA plugin error`. Check the
+  guest kernel log for nvgpu faults and verify that `gpu-vm-node-access` granted
+  the service access to every required node.
+- If a managed container cannot connect, verify that the service is ready
+  before starting Docker and that the CDI spec mounts the socket path.
+- If a managed container has GPU nodes, stop testing and inspect
+  `/etc/cdi/nvidia.json`; the `managed` entry must have mounts only and no
+  `deviceNodes`.
+- If jobs complete serially or latency degrades, do not infer a broken split
+  from timing alone. Green Contexts do not guarantee concurrent progress.
+- If `gpu=all` is active during a test, record it as unmanaged interference.
+  The manager cannot observe or constrain that CUDA context.
+
+## Developer Workflow
+
+The implementation lives in the GPU partition manager package, its `gpu-vm`
+NixOS module, and the static CDI generation in `gpuvm-base.nix`. Keep protocol
+and plugin ABI changes backward compatible within a protocol version; increment
+the version before changing field layouts or semantics.
+
+Run the native mock-CUDA integration test without Jetson hardware:
+
+```bash
+nix build --impure --expr '
+  let
+    f = builtins.getFlake (toString ./.);
+    guest = f.nixosConfigurations.nvidia-jetson-orin-agx-debug-from-x86_64
+      .config.ghaf.virtualization.microvm.gpuvm.evaluatedConfig.config;
+    manager = builtins.head (builtins.filter
+      (p: (p.pname or "") == "gpu-vm-partition-manager")
+      guest.environment.systemPackages);
+  in manager.tests.unit
+'
+```
+
+The test substitutes a 16-SM CUDA backend and exercises plugin discovery,
+geometry readback, two simultaneous slots, status, cancellation, queue release,
+and unknown-plugin rejection through the real socket and client.
+
+Build the real aarch64 manager and plugins through the AGX cross
+configuration. Never compile them on the target:
+
+```bash
+nix build .#packages.x86_64-linux.nvidia-jetson-orin-agx-debug-from-x86_64
+nix build .#packages.x86_64-linux.nvidia-jetson-orin-nx-debug-from-x86_64
+```
+
+Hardware validation must cover both AGX and NX before claiming both boards as
+live-validated. On each board, record the queried split, direct CDI smoke,
+managed CDI smoke, two simultaneous managed jobs, cancellation, a full
+30-minute dual-slot run, guest nvgpu errors, daemon restart count, and
+`gpu-vm` restart count.
+
+For interference research, compare latency alone, latency opposite a managed
+burn job, and latency while an unrestricted `gpu=all` burn runs. Record
+throughput and p50/p95/p99/maximum latency. Report results as observations, not
+as isolation guarantees.
+
+[green-contexts]: https://docs.nvidia.com/cuda/cuda-driver-api/group__CUDA__GREEN__CONTEXTS.html
