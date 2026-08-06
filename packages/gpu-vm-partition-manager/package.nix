@@ -28,8 +28,8 @@ stdenv.mkDerivation {
     runHook preInstall
     install -Dm755 gpu-partition-manager $out/bin/gpu-partition-manager
     install -Dm755 gpu-partition-run $out/bin/gpu-partition-run
-    install -Dm644 protocol.h $out/include/ghaf-gpu-partition/protocol.h
-    install -Dm644 plugin.h $out/include/ghaf-gpu-partition/plugin.h
+    install -Dm644 protocol.h $out/include/ghaf/gpu-partition-manager/protocol.h
+    install -Dm644 plugin.h $out/include/ghaf/gpu-partition-manager/plugin.h
     runHook postInstall
   '';
 
@@ -38,5 +38,9 @@ stdenv.mkDerivation {
     platforms = [ "aarch64-linux" ];
   };
 
-  passthru.tests.unit = buildPackages.callPackage ./tests/package.nix { };
+  passthru = {
+    pluginAbiVersion = 1;
+    protocolVersion = 1;
+    tests.unit = buildPackages.callPackage ./tests/package.nix { };
+  };
 }

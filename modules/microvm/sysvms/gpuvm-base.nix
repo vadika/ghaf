@@ -15,191 +15,15 @@
   inputs,
   globalConfig,
   hostConfig,
-  config,
   ...
 }:
 let
   vmName = "gpu-vm";
   timezoneEnabled = lib.ghaf.features.isEnabledFor globalConfig "timezone" vmName;
-  partitionCfg = config.ghaf.virtualization.gpuPartitionManager;
 
-  # Prebuilt CUDA smoke test (driver API + embedded PTX, RPATH-wired to native
-  # libcuda); also the payload of the container smoke image.
+  # Minimal platform diagnostic: driver API plus an embedded PTX kernel.
   gpuVmLoad = pkgs.callPackage ../../../packages/gpu-vm-load/package.nix {
     inherit (pkgs) nvidia-jetpack;
-  };
-  partitionManager = pkgs.callPackage ../../../packages/gpu-vm-partition-manager/package.nix {
-    inherit (pkgs) nvidia-jetpack;
-  };
-
-  # Static CDI spec: the guest device layout is fixed by the passthrough DTS and
-  # the CUDA userspace is a store path, so generate the spec at build time
-  # instead of running nvidia-container-toolkit's generator in the guest.
-  # Mounts = full l4t-cuda runtime closure at its own store paths, so RPATHs
-  # and LD_LIBRARY_PATH resolve identically inside the container.
-  nvidiaCdiSpec =
-    pkgs.runCommand "nvidia-cdi-spec"
-      {
-        nativeBuildInputs = [ pkgs.buildPackages.jq ];
-        closureInfo = pkgs.closureInfo { rootPaths = [ pkgs.nvidia-jetpack.l4t-cuda ]; };
-        managedClosureInfo = pkgs.closureInfo { rootPaths = [ partitionManager ]; };
-        libPath = lib.makeLibraryPath [ pkgs.nvidia-jetpack.l4t-cuda ];
-      }
-      ''
-        jq -n \
-          --rawfile paths "$closureInfo/store-paths" \
-          --rawfile managedPaths "$managedClosureInfo/store-paths" \
-          --arg libPath "$libPath" \
-          --arg managed ${lib.boolToString partitionCfg.enable} \
-          --arg client ${partitionManager}/bin/gpu-partition-run \
-          '{
-            cdiVersion: "0.6.0",
-            kind: "nvidia.com/gpu",
-            devices: [
-              {
-                name: "all",
-                containerEdits: {
-                  # Hardware-enumerated set (2026-08-02, running gpu-vm). r36 libcuda
-                  # initializes through the tegra_drm render node and host1x-fence
-                  # (strace-proven); without them cuInit fails with CUresult=801.
-                  deviceNodes: (
-                    [
-                      "/dev/nvhost-as-gpu",
-                      "/dev/nvhost-ctrl-gpu",
-                      "/dev/nvhost-ctxsw-gpu",
-                      "/dev/nvhost-dbg-gpu",
-                      "/dev/nvhost-gpu",
-                      "/dev/nvhost-nvsched-gpu",
-                      "/dev/nvhost-nvsched_ctrl_fifo-gpu",
-                      "/dev/nvhost-power-gpu",
-                      "/dev/nvhost-prof-ctx-gpu",
-                      "/dev/nvhost-prof-dev-gpu",
-                      "/dev/nvhost-prof-gpu",
-                      "/dev/nvhost-sched-gpu",
-                      "/dev/nvhost-tsg-gpu",
-                      "/dev/nvmap",
-                      "/dev/nvgpu/igpu0/as",
-                      "/dev/nvgpu/igpu0/channel",
-                      "/dev/nvgpu/igpu0/ctrl",
-                      "/dev/nvgpu/igpu0/ctxsw",
-                      "/dev/nvgpu/igpu0/dbg",
-                      "/dev/nvgpu/igpu0/nvsched",
-                      "/dev/nvgpu/igpu0/nvsched_ctrl_fifo",
-                      "/dev/nvgpu/igpu0/power",
-                      "/dev/nvgpu/igpu0/prof",
-                      "/dev/nvgpu/igpu0/prof-ctx",
-                      "/dev/nvgpu/igpu0/prof-dev",
-                      "/dev/nvgpu/igpu0/sched",
-                      "/dev/nvgpu/igpu0/tsg",
-                      "/dev/dri/renderD128",
-                      "/dev/host1x-fence"
-                    ] | map({ path: . })
-                  )
-                }
-              }
-            ] + (if $managed == "true" then [
-              {
-                name: "managed",
-                containerEdits: {
-                  env: [ "GPU_PARTITION_SOCKET=/run/gpu-partition-manager/control.sock" ],
-                  mounts: (
-                    ((($managedPaths | split("\n") | map(select(length > 0)))
-                      - ($paths | split("\n") | map(select(length > 0)))) | map({
-                      hostPath: .,
-                      containerPath: .,
-                      options: [ "ro", "bind", "nosuid", "nodev" ]
-                    })) + [
-                      {
-                        hostPath: $client,
-                        containerPath: "/opt/ghaf/bin/gpu-partition-run",
-                        options: [ "ro", "bind", "nosuid", "nodev" ]
-                      },
-                      {
-                        hostPath: "/run/gpu-partition-manager/control.sock",
-                        containerPath: "/run/gpu-partition-manager/control.sock",
-                        options: [ "bind" ]
-                      }
-                    ]
-                  )
-                }
-              }
-            ] else [] end),
-            containerEdits: {
-              # ponytail: this env edit clobbers any image-provided LD_LIBRARY_PATH;
-              # switch to an ldconfig-hook approach if third-party images matter.
-              env: [ ("LD_LIBRARY_PATH=" + $libPath) ],
-              mounts: (
-                $paths | split("\n") | map(select(length > 0) | {
-                  hostPath: .,
-                  containerPath: .,
-                  options: [ "ro", "bind", "nosuid", "nodev" ]
-                })
-              )
-            }
-          }' > "$out"
-      '';
-
-  # OCI image holding only the smoke binary; CUDA libs arrive via CDI mounts,
-  # and gpu-vm-load's RPATH points at the same l4t-cuda store path CDI mounts.
-  gpuSmokeImage = pkgs.dockerTools.buildImage {
-    name = "gpu-smoke";
-    tag = "latest";
-    copyToRoot = gpuVmLoad;
-    config.Cmd = [
-      "/bin/gpu-vm-load"
-      "5"
-    ];
-  };
-
-  gpuContainerSmoke = pkgs.writeShellApplication {
-    name = "gpu-container-smoke";
-    runtimeInputs = [ pkgs.docker ];
-    text = ''
-      # Proves CDI end-to-end: spec resolution, device-node injection, lib
-      # mounts, and a real kernel launch on the passed-through GPU.
-      docker load < ${gpuSmokeImage}
-      docker run --rm --device nvidia.com/gpu=all gpu-smoke:latest | grep GPU_LOAD_OK
-      echo CONTAINER_GPU_OK
-    '';
-  };
-
-  gpuManagedSmokeImage = pkgs.dockerTools.buildImage {
-    name = "gpu-managed-smoke";
-    tag = "latest";
-    copyToRoot = pkgs.buildEnv {
-      name = "gpu-managed-smoke-root";
-      paths = [
-        pkgs.busybox
-        gpuVmLoad
-      ];
-      pathsToLink = [ "/bin" ];
-    };
-    config.Cmd = [
-      "/bin/sh"
-      "-c"
-      ''
-        test ! -e /dev/nvgpu
-        test ! -e /dev/nvhost-gpu
-        if /bin/gpu-vm-load 1; then
-          echo MANAGED_GPU_NODE_LEAK
-          exit 1
-        fi
-        /opt/ghaf/bin/gpu-partition-run status
-        /opt/ghaf/bin/gpu-partition-run burn --seconds 5
-        echo MANAGED_CONTAINER_GPU_OK
-      ''
-    ];
-  };
-
-  gpuPartitionContainerSmoke = pkgs.writeShellApplication {
-    name = "gpu-partition-container-smoke";
-    runtimeInputs = [ pkgs.docker ];
-    text = ''
-      docker load < ${gpuManagedSmokeImage}
-      docker run --rm --device nvidia.com/gpu=managed \
-        gpu-managed-smoke:latest | grep MANAGED_CONTAINER_GPU_OK
-      echo MANAGED_CDI_OK
-    '';
   };
 in
 {
@@ -211,6 +35,7 @@ in
     inputs.self.nixosModules.hardware-x86_64-guest-kernel
     inputs.self.nixosModules.vm-modules
     inputs.self.nixosModules.profiles
+    ./gpuvm-container-runtime.nix
     ./gpuvm-partition-manager.nix
   ];
 
@@ -267,13 +92,6 @@ in
       enable = true;
       name = vmName;
       encryption.enable = globalConfig.storage.encryption.enable or false;
-      # Docker image/container store survives gpu-vm reboots.
-      directories = [
-        {
-          directory = "/var/lib/docker";
-          mode = "0710";
-        }
-      ];
     };
 
     virtualization.microvm = {
@@ -335,9 +153,7 @@ in
       # Prebuilt smoke test (driver API + embedded PTX, RPATH-wired to native
       # libcuda), built at image time since the guest can't compile on-device.
       gpuVmLoad
-      gpuContainerSmoke
-    ]
-    ++ lib.optional partitionCfg.enable gpuPartitionContainerSmoke;
+    ];
 
   # GPU nodes are created root-only at early nvgpu load, before udev rules
   # reliably apply, so a rule alone leaves them root:root. Re-grant video-group
@@ -359,22 +175,7 @@ in
       done
     '';
   };
-  users.users.ghaf.extraGroups = [
-    "video"
-    "docker"
-  ];
-
-  # Rootful Docker with CDI so CUDA payloads run in containers:
-  #   docker run --device nvidia.com/gpu=all <image>
-  # The CDI spec at /etc/cdi/nvidia.json is nix-generated (see below); no
-  # nvidia-container-toolkit in the guest.
-  virtualisation.docker = {
-    enable = true;
-    daemon.settings = {
-      features.cdi = true;
-      cdi-spec-dirs = [ "/etc/cdi" ];
-    };
-  };
+  users.users.ghaf.extraGroups = [ "video" ];
 
   # cudaPackages' cuda_compat libcuda.so.1 wins the path collision but can't find
   # the native L4T driver stack -> cuInit error 999. Put l4t-cuda's native libcuda
@@ -383,8 +184,6 @@ in
   environment.variables.LD_LIBRARY_PATH = lib.mkForce (
     lib.makeLibraryPath [ pkgs.nvidia-jetpack.l4t-cuda ]
   );
-
-  environment.etc."cdi/nvidia.json".source = nvidiaCdiSpec;
 
   # Sustained GPU compute load for verifying passthrough (tegrastats GR3D_FREQ).
   # Compile on-device: nvcc /etc/gpu-test/vectorAdd.cu -o /tmp/va && /tmp/va

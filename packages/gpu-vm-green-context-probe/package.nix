@@ -13,10 +13,9 @@ stdenv.mkDerivation {
 
   buildPhase = ''
     runHook preBuild
-    cp ${../gpu-vm-load/vadd.ptx} vadd.ptx
     $CC -Wall -Wextra -Werror \
       -I${nvidia-jetpack.cudaPackages.cuda_cudart}/include runner.c \
-      -o gpu-vm-green-context-probe -pthread \
+      -o gpu-vm-green-context-probe \
       -L${nvidia-jetpack.l4t-cuda}/lib -l:libcuda.so.1 \
       -Wl,-rpath,${nvidia-jetpack.l4t-cuda}/lib
     runHook postBuild
@@ -30,7 +29,7 @@ stdenv.mkDerivation {
   '';
 
   meta = {
-    description = "CUDA Green Context capability and concurrency probe for gpu-vm";
+    description = "CUDA Green Context capability probe for gpu-vm";
     platforms = [ "aarch64-linux" ];
     mainProgram = "gpu-vm-green-context-probe";
   };

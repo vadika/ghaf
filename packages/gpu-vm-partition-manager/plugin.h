@@ -3,8 +3,6 @@
 #ifndef GHAF_GPU_PARTITION_PLUGIN_H
 #define GHAF_GPU_PARTITION_PLUGIN_H
 
-#include "protocol.h"
-
 #include <cuda.h>
 #include <signal.h>
 #include <stddef.h>

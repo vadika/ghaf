@@ -23,6 +23,9 @@
     ghaf-qemu-bpmp = final.callPackage ./pkgs-by-name/ghaf-qemu-bpmp/package.nix { };
     ghaf-qemu-bpmp-gpu = final.callPackage ./pkgs-by-name/ghaf-qemu-bpmp-gpu/package.nix { };
     ghaf-vms = final.callPackage ./pkgs-by-name/ghaf-vms/package.nix { };
+    gpu-vm-partition-manager-sdk =
+      final.callPackage ./pkgs-by-name/gpu-vm-partition-manager-sdk/package.nix
+        { };
     hardware-scan = final.callPackage ./pkgs-by-name/hardware-scan/package.nix { };
     make-checks = final.callPackage ./pkgs-by-name/make-checks/package.nix { };
     memsocket = final.callPackage ./pkgs-by-name/memsocket/package.nix { };

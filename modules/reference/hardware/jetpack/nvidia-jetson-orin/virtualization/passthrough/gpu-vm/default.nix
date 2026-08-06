@@ -30,15 +30,6 @@ let
     "agx-industrial"
     "nx"
   ];
-  mkPartitionPlugin =
-    pluginName: pluginSource:
-    pkgs.callPackage ../../../../../../../../packages/gpu-vm-partition-manager/plugin.nix {
-      inherit (pkgs) nvidia-jetpack;
-      inherit pluginName pluginSource;
-    };
-  burnPlugin = mkPartitionPlugin "burn" ../../../../../../../../packages/gpu-vm-partition-manager/plugins/burn.c;
-  latencyPlugin = mkPartitionPlugin "latency" ../../../../../../../../packages/gpu-vm-partition-manager/plugins/latency.c;
-
   gpuvm-dtb = mkOrinGpuDtb {
     inherit lib pkgs board;
     cap = capabilities.gpuvm;
@@ -55,22 +46,21 @@ in
       description = "Pass the Tegra234 GPU and engines through to gpu-vm on NVIDIA Orin AGX or NX";
     };
 
+    containerRuntime.enable = lib.mkEnableOption "Docker with NVIDIA CDI devices in gpu-vm";
+
     partitionManager = {
       enable = lib.mkOption {
         type = lib.types.bool;
-        default = config.ghaf.profiles.debug.enable && supportedPartitionSoM;
+        default = false;
         description = ''
           Enable the cooperative CUDA Green Context job manager in gpu-vm.
-          Debug AGX and NX split-VM configurations enable it by default.
+          A downstream configuration must also supply trusted workload plugins.
         '';
       };
 
       plugins = lib.mkOption {
         type = lib.types.listOf lib.types.package;
-        default = [
-          burnPlugin
-          latencyPlugin
-        ];
+        default = [ ];
         description = "Trusted Nix-built workload plugins loaded by gpu-partition-manager.";
       };
     };
@@ -162,6 +152,7 @@ in
         ghaf.virtualization.gpuPartitionManager = {
           inherit (cfg.partitionManager) enable plugins;
         };
+        ghaf.virtualization.gpuContainerRuntime.enable = cfg.containerRuntime.enable;
       }
     ];
   };

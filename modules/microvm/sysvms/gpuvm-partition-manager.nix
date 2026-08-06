@@ -30,8 +30,9 @@ in
       default = [ ];
       description = ''
         Trusted Nix packages implementing the gpu-partition-manager ABI.
-        Each package must expose gpuPartitionPluginName and install its shared
-        object at lib/gpu-partition-manager/plugin.so.
+        Each package must expose gpuPartitionPluginName and
+        requiredPluginAbiVersion, and install its shared object at
+        lib/gpu-partition-manager/plugin.so.
       '';
     };
   };
@@ -47,8 +48,18 @@ in
         message = "every gpuPartitionManager plugin must expose gpuPartitionPluginName";
       }
       {
+        assertion = lib.all (plugin: plugin ? requiredPluginAbiVersion) cfg.plugins;
+        message = "every gpuPartitionManager plugin must expose requiredPluginAbiVersion";
+      }
+      {
+        assertion = lib.all (
+          plugin: (plugin.requiredPluginAbiVersion or null) == manager.pluginAbiVersion
+        ) cfg.plugins;
+        message = "every gpuPartitionManager plugin must use the manager plugin ABI";
+      }
+      {
         assertion =
-          lib.length (lib.unique (map (plugin: plugin.gpuPartitionPluginName) cfg.plugins))
+          lib.length (lib.unique (map (plugin: plugin.gpuPartitionPluginName or null) cfg.plugins))
           == lib.length cfg.plugins;
         message = "gpuPartitionManager plugin names must be unique";
       }
