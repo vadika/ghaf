@@ -104,6 +104,66 @@ The option has an effect only when
 `ghaf.hardware.nvidia.passthroughs.gpu_vm.enable` selects the split `gpu-vm`.
 It is not enabled for the combined accelerated `gui-vm` topology.
 
+### Deploy and Connect
+
+Build the complete image and its matching flash wrapper. The flash wrapper is
+a host tool, so flash-script builds need local scheduling enabled even though
+the expensive derivations still use configured remote builders.
+
+<Tabs>
+  <TabItem label="AGX">
+
+```bash
+image=$(nix build \
+  .#nvidia-jetson-orin-agx-debug-from-x86_64 \
+  --no-link --print-out-paths)
+flash=$(nix build \
+  .#nvidia-jetson-orin-agx-debug-from-x86_64-flash-script \
+  --max-jobs 8 --no-link --print-out-paths)
+```
+
+  </TabItem>
+  <TabItem label="NX">
+
+```bash
+image=$(nix build \
+  .#nvidia-jetson-orin-nx-debug-from-x86_64 \
+  --no-link --print-out-paths)
+flash=$(nix build \
+  .#nvidia-jetson-orin-nx-debug-from-x86_64-flash-script \
+  --max-jobs 8 --no-link --print-out-paths)
+```
+
+  </TabItem>
+</Tabs>
+
+Put the selected board into Force Recovery Mode and confirm its USB product ID
+before running the destructive flash. AGX uses `0955:7023`; Orin NX 16 GB uses
+`0955:7323`. Never select a target from a stale device path or board-name
+assumption.
+
+```bash
+lsusb | grep '0955:'
+sudo -E env USER=root "$flash/bin/flash-ghaf-host" -s "$image"
+```
+
+The separate image argument is required because the flash wrapper does not
+embed the multi-gigabyte SD image. `USER=root` is explicit because NVIDIA's
+`flash.sh` checks that environment variable in addition to requiring UID 0.
+
+After the host and `net-vm` boot, obtain the current `net-vm` LAN address and
+connect to `gpu-vm` through it:
+
+```bash
+ssh -J ghaf@NETVM_LAN_IP ghaf@192.168.100.4
+systemctl status gpu-partition-manager
+gpu-partition-run status
+```
+
+The default debug-image password is `ghaf`. A full flash regenerates SSH host
+keys, so isolate or remove only the stale entry for the reflashed device rather
+than disabling host-key checking globally.
+
 ### Plugin Package Contract
 
 Every entry in `plugins` must be a trusted Nix package with:
@@ -150,6 +210,9 @@ The client uses `/run/gpu-partition-manager/control.sock` by default. Use
 `--socket PATH` only for development tests.
 
 ```bash
+# Show client syntax.
+gpu-partition-run --help
+
 # Show configured plugins and descriptions.
 gpu-partition-run list
 
@@ -316,6 +379,18 @@ configuration. Never compile them on the target:
 nix build .#packages.x86_64-linux.nvidia-jetson-orin-agx-debug-from-x86_64
 nix build .#packages.x86_64-linux.nvidia-jetson-orin-nx-debug-from-x86_64
 ```
+
+### Validation Status
+
+| Board | Build and evaluation | Live hardware |
+| --- | --- | --- |
+| Orin AGX | Passed | Passed on 2026-08-06: 16 SM to 8+8 split, standalone probe, direct and managed CDI smoke tests, concurrent jobs, FIFO queue release, cancellation, and a 30-minute dual-slot burn with no manager restart or nvgpu fault |
+| Orin NX | Passed | Pending; do not infer hardware behavior from the shared package build |
+
+The AGX endurance run completed 11,136 validated burn iterations per slot. The
+result confirms this implementation on that board and software revision; it
+does not turn Green Contexts into a performance or security isolation
+guarantee.
 
 Hardware validation must cover both AGX and NX before claiming both boards as
 live-validated. On each board, record the queried split, direct CDI smoke,
