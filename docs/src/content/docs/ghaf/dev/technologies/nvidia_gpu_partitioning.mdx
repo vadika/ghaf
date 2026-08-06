@@ -168,6 +168,29 @@ The default debug-image password is `ghaf`. A full flash regenerates SSH host
 keys, so isolate or remove only the stale entry for the reflashed device rather
 than disabling host-key checking globally.
 
+### Platform Capability Probe
+
+Ghaf installs `gpu-vm-green-context-probe` as a platform diagnostic. Its
+default invocation asks CUDA for two groups with a minimum of 4 SMs each. On
+AGX that proves two Green Contexts can be constructed but normally leaves 8
+SMs as a remainder; it does not validate the manager's exact 8+8 geometry.
+
+Use a board-appropriate minimum and compare the result with the manager's
+runtime status:
+
+```bash
+# AGX: expect two 8-SM groups, zero remainder, and two 8-SM manager slots.
+gpu-vm-green-context-probe --min-sm-count 8
+gpu-partition-run status
+
+# NX: expect two 4-SM groups, zero remainder, and two 4-SM manager slots.
+gpu-vm-green-context-probe --min-sm-count 4
+gpu-partition-run status
+```
+
+The probe creates and destroys temporary Green Contexts. Run it when no
+managed or unrestricted CUDA workload is active.
+
 ### Plugin Package Contract
 
 Every entry in `plugins` must be a trusted Nix package with:
@@ -377,10 +400,10 @@ nix build .#packages.x86_64-linux.nvidia-jetson-orin-nx-debug-from-x86_64
 
 | Board | Build and evaluation | Live hardware |
 | --- | --- | --- |
-| Orin AGX | Passed | The pre-extraction implementation passed on 2026-08-06: 16 SM to 8+8 split, capability probe, direct and managed CDI, queue release, cancellation, and a 30-minute dual-slot workload with no manager restart or nvgpu fault. Repeat after extraction. |
+| Orin AGX | Passed | The extracted dependency chain was flashed and passed on 2026-08-06: 16 SM to 8+8 split, exact-geometry probe, direct and managed CDI, queue release, cancellation, interference observation, and a 30-minute dual-slot workload with no manager or GPU-VM restart and no relevant nvgpu fault. |
 | Orin NX | Passed | Pending; do not infer hardware behavior from the shared package build |
 
-The AGX endurance run completed 11,136 validated burn iterations per slot. The
+The AGX endurance run completed 11,137 validated burn iterations per slot. The
 result confirms this implementation on that board and software revision; it
 does not turn Green Contexts into a performance or security isolation
 guarantee.
