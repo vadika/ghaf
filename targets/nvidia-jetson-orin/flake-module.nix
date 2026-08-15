@@ -57,6 +57,37 @@ let
       ];
     };
 
+  linux71PkvmHostModule =
+    { lib, pkgs, ... }:
+    {
+      # Keep this canary target-local. The Orin hardware module still defaults
+      # to JetPack's 6.6 host kernel for every other target.
+      ghaf.hardware.nvidia.orin.hostKernelPackages = lib.mkForce pkgs.linuxPackages_7_1;
+
+      # The external JetPack module adds R36.5 OOT drivers to the initrd root
+      # set. This canary intentionally builds only the host-critical DCE trio,
+      # so preserve the NixOS defaults and upstream Tegra boot modules while
+      # omitting unavailable deferred modules such as nvethernet and nvpps.
+      boot.initrd.availableKernelModules = lib.mkForce [
+        "autofs"
+        "efivarfs"
+        "ext2"
+        "ext4"
+        "xhci-tegra"
+        "ucsi_ccg"
+        "typec_ucsi"
+        "typec"
+        "nvme"
+        # Linux 7.1's defconfig makes the eMMC block layer modular even though
+        # the Tegra SDHCI host controller remains built in.
+        "mmc_block"
+        "phy-tegra-xusb"
+        "i2c-tegra"
+        "phy_tegra194_p2u"
+        "pcie_tegra194"
+      ];
+    };
+
   # Exercise the complete manager/CDI integration in an existing CI-built
   # image without making example workloads part of Ghaf. The manager-owned
   # mock plugin is sufficient for build and boot validation; downstream
@@ -210,6 +241,7 @@ let
       hardwareModule = self.nixosModules.hardware-nvidia-jetson-orin-agx;
       variant = "debug";
       extraModules = commonModules ++ [
+        linux71PkvmHostModule
         (
           { config, ... }:
           let

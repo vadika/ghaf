@@ -130,6 +130,7 @@ in
         cap = capabilities.guivm;
         dtb = guivm-dtb;
         crosvmOverlay = guivm-crosvm-overlay;
+        guestKernelPackages = config.ghaf.hardware.nvidia.orin.guestKernelPackages;
         inherit (payload) vfioArgs;
         inherit (virt) sourcesPatch;
       })

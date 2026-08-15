@@ -21,6 +21,7 @@
 let
   cfg = config.ghaf.hardware.nvidia.passthroughs.mgbe0_net_vm;
   virt = config.ghaf.hardware.nvidia.virtualization;
+  guestKernelPackages = config.ghaf.hardware.nvidia.orin.guestKernelPackages;
   configuredNetVmVmm = config.ghaf.virtualization.vmConfig.sysvms.netvm.vmm or null;
   netVmVmm =
     if configuredNetVmVmm == null then
@@ -251,10 +252,10 @@ in
           guestKernelVersion = config.boot.kernelPackages.kernel.version;
         in
         {
-          # v6.12 hardcodes MGBE0's SMMU stream id (0x6); v6.13+ reads it from an
-          # iommu_fwspec the QEMU virt guest lacks (probe -EINVALs). v6.12 also
-          # carries the Oct-2024 serdes bring-up fix (1cff6ff30) that v6.6 lacks.
-          boot.kernelPackages = lib.mkForce pkgs.linuxPackages_6_12;
+          # The selected kernel must carry the Oct-2024 serdes bring-up fix
+          # (1cff6ff30). The patch below restores the fixed stream-id fallback
+          # needed by a passthrough guest without an iommu_fwspec.
+          boot.kernelPackages = lib.mkForce guestKernelPackages;
 
           # MANDATORY, independent of the host proxy's allow-list. At
           # late_initcall the guest runs clk_disable_unused() /
@@ -282,7 +283,9 @@ in
             {
               name = "bpmp-virt core hooks";
               patch =
-                if lib.versionAtLeast guestKernelVersion "6.12" then
+                if lib.versionAtLeast guestKernelVersion "7.1" then
+                  ../../common/bpmp-virt-common/patches/0001-bpmp-virt-hooks.patch
+                else if lib.versionAtLeast guestKernelVersion "6.12" then
                   ../../common/bpmp-virt-common/patches/0001-bpmp-virt-hooks-6.12.patch
                 else
                   ../../common/bpmp-virt-common/patches/0001-bpmp-virt-hooks.patch;
