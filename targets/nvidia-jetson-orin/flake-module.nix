@@ -117,6 +117,26 @@ let
       ];
     };
 
+  pkvmHostOnlyModule =
+    { lib, ... }:
+    {
+      # Diagnose protected host mode independently of guest startup. The
+      # ordinary accelerated GUI target remains the rollback image.
+      boot.kernelParams = [ "kvm-arm.mode=protected" ];
+
+      # Ghaf's boot-order module starts every configured VM regardless of the
+      # microvm.nix autostart setting. Disable it for this host-only canary and
+      # force every VM in this fixed target topology to remain stopped.
+      ghaf.microvm-boot.enable = lib.mkForce false;
+      microvm.vms = {
+        "admin-vm".autostart = lib.mkForce false;
+        "net-vm".autostart = lib.mkForce false;
+        "gui-vm".autostart = lib.mkForce false;
+        "chromium-vm".autostart = lib.mkForce false;
+        "flatpak-vm".autostart = lib.mkForce false;
+      };
+    };
+
   # Exercise the complete manager/CDI integration in an existing CI-built
   # image without making example workloads part of Ghaf. The manager-owned
   # mock plugin is sufficient for build and boot validation; downstream
@@ -509,6 +529,21 @@ let
       ];
   all-target-configs = target-configs ++ verity-target-configs;
 
+  pkvmHostOnlyTarget =
+    let
+      baseTarget = lib.findFirst (
+        target: target.name == "nvidia-jetson-orin-agx-accelerated-guivm-debug"
+      ) (throw "AGX accelerated GUI target not found") target-configs;
+    in
+    baseTarget
+    // rec {
+      name = "nvidia-jetson-orin-agx-accelerated-guivm-pkvm-host-only-debug";
+      hostConfiguration = baseTarget.hostConfiguration.extendModules {
+        modules = [ pkvmHostOnlyModule ];
+      };
+      package = hostConfiguration.config.system.build.ghafImage;
+    };
+
   generate-nodemoapps =
     tgt:
     tgt
@@ -558,7 +593,8 @@ let
     all-target-configs
     ++ (map generate-nodemoapps all-target-configs)
     ++ (map generate-luks luksable-target-configs)
-    ++ (map (t: generate-luks (generate-nodemoapps t)) luksable-target-configs);
+    ++ (map (t: generate-luks (generate-nodemoapps t)) luksable-target-configs)
+    ++ [ pkvmHostOnlyTarget ];
   crossTargets = map generate-cross-from-x86_64 targets;
   flashTarget =
     t: qspiOnly:
