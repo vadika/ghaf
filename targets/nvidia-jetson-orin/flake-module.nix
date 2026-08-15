@@ -41,6 +41,22 @@ let
     self.nixosModules.profiles
   ];
 
+  linux71PkvmGuestModule =
+    { lib, pkgs, ... }:
+    {
+      boot.kernelPackages = lib.mkForce pkgs.linuxPackages_7_1;
+      boot.kernelPatches = [
+        {
+          name = "Arm pKVM guest support";
+          patch = null;
+          structuredExtraConfig = with lib.kernel; {
+            DMA_RESTRICTED_POOL = yes;
+            ARM_PKVM_GUEST = yes;
+          };
+        }
+      ];
+    };
+
   # Exercise the complete manager/CDI integration in an existing CI-built
   # image without making example workloads part of Ghaf. The manager-owned
   # mock plugin is sufficient for build and boot validation; downstream
@@ -227,6 +243,11 @@ let
         hardware.nvidia.passthroughs.gui_vm.enable = true;
         hardware.nvidia.passthroughs.gpu_vm.enable = lib.mkForce false;
         hardware.nvidia.passthroughs.disp_vm.enable = lib.mkForce false;
+      };
+      vmConfig = {
+        sysvms.adminvm.extraModules = [ linux71PkvmGuestModule ];
+        appvms.chromium.extraModules = [ linux71PkvmGuestModule ];
+        appvms.flatpak.extraModules = [ linux71PkvmGuestModule ];
       };
     })
 
