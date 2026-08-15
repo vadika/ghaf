@@ -57,6 +57,26 @@ let
       ];
     };
 
+  netvmCrosvmVgicItsModule =
+    { config, lib, ... }:
+    {
+      assertions = [
+        {
+          assertion = config.microvm.hypervisor == "crosvm";
+          message = "The AGX NetVM vGIC ITS canary requires Crosvm";
+        }
+      ];
+
+      # AArch64 Crosvm leaves the virtual ITS disabled by default, which makes
+      # PCI passthrough fall back to legacy INTx. The RTL8822CE then storms its
+      # shared level interrupt until Linux disables it. Expose the ITS so the
+      # physical device can use MSI inside NetVM.
+      microvm.crosvm.extraArgs = lib.mkIf (config.microvm.hypervisor == "crosvm") [
+        "--irqchip"
+        "kernel[allow-vgic-its]"
+      ];
+    };
+
   linux71PkvmHostModule =
     { lib, pkgs, ... }:
     {
@@ -287,6 +307,7 @@ let
       };
       vmConfig = {
         sysvms.adminvm.extraModules = [ linux71PkvmGuestModule ];
+        sysvms.netvm.extraModules = [ netvmCrosvmVgicItsModule ];
         appvms.chromium.extraModules = [ linux71PkvmGuestModule ];
         appvms.flatpak.extraModules = [ linux71PkvmGuestModule ];
       };
