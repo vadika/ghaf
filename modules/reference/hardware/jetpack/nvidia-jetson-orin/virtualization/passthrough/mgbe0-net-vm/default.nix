@@ -21,7 +21,7 @@
 let
   cfg = config.ghaf.hardware.nvidia.passthroughs.mgbe0_net_vm;
   virt = config.ghaf.hardware.nvidia.virtualization;
-  guestKernelPackages = config.ghaf.hardware.nvidia.orin.guestKernelPackages;
+  inherit (cfg) guestKernelPackages;
   configuredNetVmVmm = config.ghaf.virtualization.vmConfig.sysvms.netvm.vmm or null;
   netVmVmm =
     if configuredNetVmVmm == null then
@@ -135,8 +135,15 @@ in
 {
   _file = ./default.nix;
 
-  options.ghaf.hardware.nvidia.passthroughs.mgbe0_net_vm.enable =
-    lib.mkEnableOption "MGBE0 (ethernet@6800000) passthrough to the Net-VM on NVIDIA Orin";
+  options.ghaf.hardware.nvidia.passthroughs.mgbe0_net_vm = {
+    enable = lib.mkEnableOption "MGBE0 (ethernet@6800000) passthrough to the Net-VM on NVIDIA Orin";
+    guestKernelPackages = lib.mkOption {
+      type = lib.types.raw;
+      default = config.ghaf.hardware.nvidia.orin.guestKernelPackages;
+      defaultText = lib.literalExpression "config.ghaf.hardware.nvidia.orin.guestKernelPackages";
+      description = "Kernel package set used by the MGBE0 NetVM guest.";
+    };
+  };
 
   config = lib.mkIf cfg.enable {
     # The guest can only bring MGBE0 up through the BPMP host proxy.

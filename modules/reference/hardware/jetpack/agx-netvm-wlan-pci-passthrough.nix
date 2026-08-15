@@ -12,8 +12,19 @@ in
 {
   _file = ./agx-netvm-wlan-pci-passthrough.nix;
 
-  options.ghaf.hardware.nvidia.orin.agx.enableNetvmWlanPCIPassthrough =
-    lib.mkEnableOption "WLAN or ethernet card PCI passthrough to NetVM";
+  options.ghaf.hardware.nvidia.orin.agx = {
+    enableNetvmWlanPCIPassthrough = lib.mkEnableOption "WLAN or ethernet card PCI passthrough to NetVM";
+    netvmWlanCrosvmIommu = lib.mkOption {
+      type = lib.types.enum [
+        "off"
+        "viommu"
+        "coiommu"
+        "pkvm-iommu"
+      ];
+      default = "viommu";
+      description = "Crosvm IOMMU mode for AGX NetVM PCI passthrough devices.";
+    };
+  };
   config = lib.mkIf cfg.agx.enableNetvmWlanPCIPassthrough {
     # Orin AGX WLAN card PCI passthrough
     ghaf.hardware.nvidia.orin.enablePCIPassthroughCommon = true;
@@ -31,11 +42,15 @@ in
               {
                 bus = "pci";
                 path = "0001:01:00.0";
-                crosvm.guestAddress = "00:1f.0";
+                crosvm = {
+                  guestAddress = "00:1f.0";
+                  iommu = cfg.agx.netvmWlanCrosvmIommu;
+                };
               }
               {
                 bus = "pci";
                 path = "0000:01:00.0";
+                crosvm.iommu = cfg.agx.netvmWlanCrosvmIommu;
               }
             ]
           else
@@ -43,7 +58,10 @@ in
               {
                 bus = "pci";
                 path = "0001:01:00.0";
-                crosvm.guestAddress = "00:1f.0";
+                crosvm = {
+                  guestAddress = "00:1f.0";
+                  iommu = cfg.agx.netvmWlanCrosvmIommu;
+                };
               }
             ];
         # Network Manager is defined for netvm of Orin Devices

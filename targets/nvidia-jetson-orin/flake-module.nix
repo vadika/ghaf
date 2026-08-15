@@ -64,6 +64,15 @@ let
       # to JetPack's 6.6 host kernel for every other target.
       ghaf.hardware.nvidia.orin.hostKernelPackages = lib.mkForce pkgs.linuxPackages_7_1;
 
+      # MGBE0 owns the NetVM kernel selection so its BPMP patches follow that
+      # kernel. Keep GUIVM on the independently selected 6.12 package set.
+      ghaf.hardware.nvidia.passthroughs.mgbe0_net_vm.guestKernelPackages = pkgs.linuxPackages_7_1;
+
+      # Crosvm's AArch64 virtio-IOMMU currently crashes in
+      # viommu_probe_device before NetVM can boot. Keep host SMMU/VFIO
+      # isolation, but bypass guest virtio-IOMMU for this canary.
+      ghaf.hardware.nvidia.orin.agx.netvmWlanCrosvmIommu = "off";
+
       # The external JetPack module adds R36.5 OOT drivers to the initrd root
       # set. This canary intentionally builds only the host-critical DCE trio,
       # so preserve the NixOS defaults and upstream Tegra boot modules while
