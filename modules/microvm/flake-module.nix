@@ -14,6 +14,7 @@
       imports = [
         inputs.microvm.nixosModules.microvm
         ./common/crosvm-platform.nix
+        ./common/crosvm-protection.nix
       ];
       _module.args.microvmFlake = inputs.microvm;
     };

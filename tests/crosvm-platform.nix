@@ -28,6 +28,14 @@ let
       macvtapFds = { };
       linuxTarget = nixos.pkgs.linux.target or nixos.pkgs.stdenv.hostPlatform.linux-kernel.target;
     }).command;
+  shutdownFor =
+    nixos:
+    (import ../modules/microvm/common/crosvm-command.nix {
+      inherit (nixos) pkgs;
+      microvmConfig = nixos.config.microvm;
+      macvtapFds = { };
+      linuxTarget = nixos.pkgs.linux.target or nixos.pkgs.stdenv.hostPlatform.linux-kernel.target;
+    }).shutdownCommand;
   assertionsPass = nixos: builtins.all ({ assertion, ... }: assertion) nixos.config.assertions;
   valid = makeConfig "x86_64-linux" [
     {
@@ -136,8 +144,85 @@ let
       };
     }
   ];
+  protected = makeConfig "aarch64-linux" [
+    { microvm.crosvm.protection.mode = "protected-without-firmware"; }
+  ];
+  protectedWithFirmware = makeConfig "aarch64-linux" [
+    {
+      microvm.crosvm.protection = {
+        mode = "protected-with-firmware";
+        firmware = pkgs.writeText "test-pvmfw" "";
+      };
+    }
+  ];
+  protectedMissingFirmware = makeConfig "aarch64-linux" [
+    { microvm.crosvm.protection.mode = "protected-with-firmware"; }
+  ];
+  protectedOnX86 = makeConfig "x86_64-linux" [
+    { microvm.crosvm.protection.mode = "protected-without-firmware"; }
+  ];
+  protectedOnQemu = makeConfig "aarch64-linux" [
+    {
+      microvm = {
+        hypervisor = lib.mkForce "qemu";
+        crosvm.protection.mode = "protected-without-firmware";
+      };
+    }
+  ];
+  firmwareInUnprotectedMode = makeConfig "aarch64-linux" [
+    { microvm.crosvm.protection.firmware = pkgs.writeText "unused-pvmfw" ""; }
+  ];
+  protectedWithBalloon = makeConfig "aarch64-linux" [
+    {
+      microvm = {
+        balloon = true;
+        crosvm.protection.mode = "protected-without-firmware";
+      };
+    }
+  ];
+  protectedWithDevice = makeConfig "aarch64-linux" [
+    {
+      microvm = {
+        crosvm.protection.mode = "protected-without-firmware";
+        devices = [
+          {
+            bus = "pci";
+            path = "0000:01:00.0";
+          }
+        ];
+      };
+    }
+  ];
+  protectedWithShare = makeConfig "aarch64-linux" [
+    {
+      microvm = {
+        crosvm.protection.mode = "protected-without-firmware";
+        shares = [
+          {
+            tag = "test-share";
+            source = "/tmp";
+            mountPoint = "/tmp/shared";
+            proto = "virtiofs";
+          }
+        ];
+      };
+    }
+  ];
+  protectedWithGraphics = makeConfig "aarch64-linux" [
+    {
+      microvm = {
+        crosvm.protection.mode = "protected-without-firmware";
+        graphics.enable = true;
+      };
+    }
+  ];
+  rawProtectionArg = makeConfig "aarch64-linux" [
+    { microvm.crosvm.extraArgs = [ "--protected-vm-without-firmware" ]; }
+  ];
   command = commandFor valid;
   layoutCommand = commandFor layout;
+  protectedCommand = commandFor protected;
+  protectedFirmwareCommand = commandFor protectedWithFirmware;
 in
 assert lib.hasInfix "--device-tree-overlay 'overlay file.dtbo'" command;
 assert lib.hasInfix
@@ -146,8 +231,14 @@ assert lib.hasInfix
 assert lib.hasInfix "/sys/bus/pci/devices/0000:01:00.0,iommu=viommu,guest-address=00:1f.0" command;
 assert lib.hasInfix "--mem 'size=512,base=0x2000000000'" layoutCommand;
 assert lib.hasInfix "--platform-mmio 'base=0x60000000,size=0x1fa0000000'" layoutCommand;
+assert lib.hasInfix "--protected-vm-without-firmware" protectedCommand;
+assert lib.hasInfix "--protected-vm-with-firmware" protectedFirmwareCommand;
+assert lib.hasInfix "crosvm stop" (shutdownFor protected);
+assert lib.hasInfix "crosvm powerbtn" (shutdownFor valid);
 assert assertionsPass valid;
 assert assertionsPass layout;
+assert assertionsPass protected;
+assert assertionsPass protectedWithFirmware;
 assert !assertionsPass missingSymbol;
 assert !assertionsPass missingOverlay;
 assert !assertionsPass unsupportedHypervisor;
@@ -155,4 +246,13 @@ assert !assertionsPass fixedPci;
 assert !assertionsPass unsupportedLayout;
 assert !assertionsPass incompleteLayout;
 assert !assertionsPass overlappingLayout;
+assert !assertionsPass protectedMissingFirmware;
+assert !assertionsPass protectedOnX86;
+assert !assertionsPass protectedOnQemu;
+assert !assertionsPass firmwareInUnprotectedMode;
+assert !assertionsPass protectedWithBalloon;
+assert !assertionsPass protectedWithDevice;
+assert !assertionsPass protectedWithShare;
+assert !assertionsPass protectedWithGraphics;
+assert !assertionsPass rawProtectionArg;
 pkgs.runCommand "crosvm-platform" { } "touch $out"

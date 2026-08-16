@@ -36,8 +36,19 @@ let
     deviceTreeOverlays
     memoryBase
     platformMmio
+    protection
     ;
   crosvmPkg = microvmConfig.crosvm.package;
+  protectionArgs =
+    {
+      unprotected = [ ];
+      protected-without-firmware = [ "--protected-vm-without-firmware" ];
+      protected-with-firmware = [
+        "--protected-vm-with-firmware"
+      ]
+      ++ lib.optional (protection.firmware != null) (toString protection.firmware);
+    }
+    .${protection.mode};
   formatAddress = value: "0x${lib.toLower (lib.toHexString value)}";
   kernelPath =
     {
@@ -223,15 +234,17 @@ in
         ) devices
       )
       + " "
+      + lib.escapeShellArgs protectionArgs
+      + " "
       + lib.escapeShellArgs extraArgs;
 
   canShutdown = socket != null;
   shutdownCommand =
-    if socket != null && builtins.elem "--protected-vm-without-firmware" extraArgs then
+    if socket != null && protection.mode != "unprotected" then
       ''
         # AArch64 direct boot has no PM resource, so Crosvm cannot inject the
-        # power-button event. Stop this protected canary through its control
-        # socket instead of waiting for systemd to kill the process.
+        # power-button event. Stop protected guests through their control socket
+        # instead of waiting for systemd to kill the process.
         ${crosvmPkg}/bin/crosvm stop ${socket}
       ''
     else if socket != null then
