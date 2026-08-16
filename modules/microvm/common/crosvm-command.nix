@@ -39,7 +39,8 @@ let
     protection
     ;
   crosvmPkg = microvmConfig.crosvm.package;
-  protectionArgs =
+  isProtected = protection.mode != "unprotected";
+  protectionModeArgs =
     {
       unprotected = [ ];
       protected-without-firmware = [ "--protected-vm-without-firmware" ];
@@ -49,6 +50,12 @@ let
       ++ lib.optional (protection.firmware != null) (toString protection.firmware);
     }
     .${protection.mode};
+  protectionArgs =
+    protectionModeArgs
+    ++ lib.optionals isProtected [
+      "--swiotlb"
+      (toString (if protection.swiotlbSizeMiB == null then 64 else protection.swiotlbSizeMiB))
+    ];
   formatAddress = value: "0x${lib.toLower (lib.toHexString value)}";
   kernelPath =
     {

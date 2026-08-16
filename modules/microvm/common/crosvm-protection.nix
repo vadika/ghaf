@@ -14,6 +14,7 @@ let
     "--protected-vm"
     "--protected-vm-with-firmware"
     "--protected-vm-without-firmware"
+    "--swiotlb"
     "--unprotected-vm-with-firmware"
   ];
 in
@@ -35,6 +36,17 @@ in
       type = with lib.types; nullOr path;
       default = null;
       description = "Custom protected-VM firmware used by the protected-with-firmware mode.";
+    };
+
+    swiotlbSizeMiB = lib.mkOption {
+      type = with lib.types; nullOr ints.positive;
+      default = null;
+      description = ''
+        Size in MiB of the protected guest's static SWIOTLB restricted DMA
+        pool. Protected guests use 64 MiB when this is null. Virtio devices
+        advertise VIRTIO_F_ACCESS_PLATFORM and use this explicitly shared
+        pool instead of exposing private guest memory to host backends.
+      '';
     };
   };
 
@@ -58,6 +70,10 @@ in
     {
       assertion = protection.mode != "protected-with-firmware" || protection.firmware != null;
       message = "protected-with-firmware mode requires `microvm.crosvm.protection.firmware`.";
+    }
+    {
+      assertion = isProtected || protection.swiotlbSizeMiB == null;
+      message = "`microvm.crosvm.protection.swiotlbSizeMiB` requires a protected mode.";
     }
     {
       assertion = !isProtected || !cfg.balloon;

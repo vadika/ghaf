@@ -155,6 +155,14 @@ let
       };
     }
   ];
+  protectedWithLargerSwiotlb = makeConfig "aarch64-linux" [
+    {
+      microvm.crosvm.protection = {
+        mode = "protected-without-firmware";
+        swiotlbSizeMiB = 128;
+      };
+    }
+  ];
   protectedMissingFirmware = makeConfig "aarch64-linux" [
     { microvm.crosvm.protection.mode = "protected-with-firmware"; }
   ];
@@ -171,6 +179,9 @@ let
   ];
   firmwareInUnprotectedMode = makeConfig "aarch64-linux" [
     { microvm.crosvm.protection.firmware = pkgs.writeText "unused-pvmfw" ""; }
+  ];
+  swiotlbInUnprotectedMode = makeConfig "aarch64-linux" [
+    { microvm.crosvm.protection.swiotlbSizeMiB = 128; }
   ];
   protectedWithBalloon = makeConfig "aarch64-linux" [
     {
@@ -219,10 +230,14 @@ let
   rawProtectionArg = makeConfig "aarch64-linux" [
     { microvm.crosvm.extraArgs = [ "--protected-vm-without-firmware" ]; }
   ];
+  rawSwiotlbArg = makeConfig "aarch64-linux" [
+    { microvm.crosvm.extraArgs = [ "--swiotlb" ]; }
+  ];
   command = commandFor valid;
   layoutCommand = commandFor layout;
   protectedCommand = commandFor protected;
   protectedFirmwareCommand = commandFor protectedWithFirmware;
+  protectedLargerSwiotlbCommand = commandFor protectedWithLargerSwiotlb;
 in
 assert lib.hasInfix "--device-tree-overlay 'overlay file.dtbo'" command;
 assert lib.hasInfix
@@ -233,12 +248,16 @@ assert lib.hasInfix "--mem 'size=512,base=0x2000000000'" layoutCommand;
 assert lib.hasInfix "--platform-mmio 'base=0x60000000,size=0x1fa0000000'" layoutCommand;
 assert lib.hasInfix "--protected-vm-without-firmware" protectedCommand;
 assert lib.hasInfix "--protected-vm-with-firmware" protectedFirmwareCommand;
+assert lib.hasInfix "--swiotlb 64" protectedCommand;
+assert lib.hasInfix "--swiotlb 128" protectedLargerSwiotlbCommand;
+assert !lib.hasInfix "--swiotlb" command;
 assert lib.hasInfix "crosvm stop" (shutdownFor protected);
 assert lib.hasInfix "crosvm powerbtn" (shutdownFor valid);
 assert assertionsPass valid;
 assert assertionsPass layout;
 assert assertionsPass protected;
 assert assertionsPass protectedWithFirmware;
+assert assertionsPass protectedWithLargerSwiotlb;
 assert !assertionsPass missingSymbol;
 assert !assertionsPass missingOverlay;
 assert !assertionsPass unsupportedHypervisor;
@@ -250,9 +269,11 @@ assert !assertionsPass protectedMissingFirmware;
 assert !assertionsPass protectedOnX86;
 assert !assertionsPass protectedOnQemu;
 assert !assertionsPass firmwareInUnprotectedMode;
+assert !assertionsPass swiotlbInUnprotectedMode;
 assert !assertionsPass protectedWithBalloon;
 assert !assertionsPass protectedWithDevice;
 assert !assertionsPass protectedWithShare;
 assert !assertionsPass protectedWithGraphics;
 assert !assertionsPass rawProtectionArg;
+assert !assertionsPass rawSwiotlbArg;
 pkgs.runCommand "crosvm-platform" { } "touch $out"
