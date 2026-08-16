@@ -100,8 +100,8 @@ in
         ]
         ++ (if balloon then [ "--balloon-page-reporting" ] else [ "--no-balloon" ])
         ++ lib.optionals storeOnDisk [
-          "-r"
-          storeDisk
+          "--block"
+          "${storeDisk},ro=true"
         ]
         ++ lib.optionals graphics.enable [
           "--vhost-user"
@@ -227,7 +227,14 @@ in
 
   canShutdown = socket != null;
   shutdownCommand =
-    if socket != null then
+    if socket != null && builtins.elem "--protected-vm-without-firmware" extraArgs then
+      ''
+        # AArch64 direct boot has no PM resource, so Crosvm cannot inject the
+        # power-button event. Stop this protected canary through its control
+        # socket instead of waiting for systemd to kill the process.
+        ${crosvmPkg}/bin/crosvm stop ${socket}
+      ''
+    else if socket != null then
       ''
         ${crosvmPkg}/bin/crosvm powerbtn ${socket}
       ''

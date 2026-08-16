@@ -77,6 +77,39 @@ let
       ];
     };
 
+  protectedVmWithoutFirmwareModule =
+    { config, lib, ... }:
+    {
+      assertions = [
+        {
+          assertion = config.microvm.hypervisor == "crosvm";
+          message = "The AGX protected VM canary requires Crosvm";
+        }
+      ];
+
+      # Start with direct kernel boot so guest-memory isolation can be tested
+      # independently of pVM firmware and secret provisioning.
+      microvm.crosvm.extraArgs = lib.mkIf (config.microvm.hypervisor == "crosvm") [
+        "--protected-vm-without-firmware"
+      ];
+
+      # A vhost-user backend maps guest memory into a separate host process.
+      # With upstream pKVM, an access outside the guest-shared restricted DMA
+      # pool force-reclaims and poisons the private page. Keep this first
+      # protected guest free of virtio-fs; its Nix store is supplied by the
+      # target's block-backed store image instead.
+      microvm.shares = lib.mkForce [ ];
+
+      # Upstream Linux reports protected-VM support by accepting the protected
+      # KVM_CREATE_VM type. Crosvm otherwise probes an Android-only capability
+      # number after the VM has already been created and rejects Linux 7.1.
+      microvm.crosvm.package = lib.mkForce (
+        config.microvm.vmHostPackages.crosvm.overrideAttrs (old: {
+          patches = (old.patches or [ ]) ++ [ ./patches/crosvm-upstream-pkvm-create-vm.patch ];
+        })
+      );
+    };
+
   linux71PkvmHostModule =
     { lib, pkgs, ... }:
     {
@@ -117,11 +150,11 @@ let
       ];
     };
 
-  pkvmHostOnlyModule =
+  pkvmDebugModule =
     { lib, ... }:
     {
-      # Diagnose protected host mode independently of guest startup. The
-      # ordinary accelerated GUI target remains the rollback image.
+      # Keep pKVM development in one evolving debug target. The ordinary
+      # accelerated GUI target remains the rollback image.
       boot.kernelParams = [
         "kvm-arm.mode=protected"
         # Linux 7.1 selects protected hVHE on Orin by default. NVIDIA's TF-A
@@ -134,7 +167,7 @@ let
 
       # The DSU PMU CPU-online callback accesses a system register that pKVM's
       # protected hypervisor traps on Orin, causing an EL2 BUG and host panic. The
-      # host-only canary does not need DSU uncore performance counters.
+      # pKVM canary does not need DSU uncore performance counters.
       boot.blacklistedKernelModules = [ "arm_dsu_pmu" ];
 
       # NVIDIA's R36.5 TF-A loses the nVHE/pKVM timer, virtualization, and
@@ -159,13 +192,25 @@ let
       ];
 
       # Ghaf's boot-order module starts every configured VM regardless of the
-      # microvm.nix autostart setting. Disable it for this host-only canary and
-      # force every VM in this fixed target topology to remain stopped.
+      # microvm.nix autostart setting. Disable it for this staged canary and
+      # force every VM in this fixed target topology to remain stopped. Each
+      # protected-VM gate is started manually after the host passes its checks.
       ghaf.microvm-boot.enable = lib.mkForce false;
       # balloon-manager is normally pulled into microvms.target and requires
       # each ballooned AppVM's memory manager, which in turn requires the VM.
-      # Remove that indirect startup path for this host-only target.
+      # Remove that indirect startup path for this staged target.
       systemd.services.balloon-manager.wantedBy = lib.mkForce [ ];
+
+      # Protected guests cannot use the normal vhost-user ro-store without
+      # risking host access to private guest pages. Use the established Ghaf
+      # EROFS store-disk path for every guest in this debug target.
+      ghaf.virtualization.microvm.storeOnDisk.enable = true;
+
+      # AdminVM is the first device-free protected guest. Keep it manually
+      # started while later protected guests are added to this same target.
+      ghaf.virtualization.vmConfig.sysvms.adminvm.extraModules = [
+        protectedVmWithoutFirmwareModule
+      ];
       microvm.vms = {
         "admin-vm".autostart = lib.mkForce false;
         "net-vm".autostart = lib.mkForce false;
@@ -567,7 +612,7 @@ let
       ];
   all-target-configs = target-configs ++ verity-target-configs;
 
-  pkvmHostOnlyTarget =
+  pkvmDebugTarget =
     let
       baseTarget = lib.findFirst (
         target: target.name == "nvidia-jetson-orin-agx-accelerated-guivm-debug"
@@ -575,9 +620,9 @@ let
     in
     baseTarget
     // rec {
-      name = "nvidia-jetson-orin-agx-accelerated-guivm-pkvm-host-only-debug";
+      name = "nvidia-jetson-orin-agx-accelerated-guivm-pkvm-debug";
       hostConfiguration = baseTarget.hostConfiguration.extendModules {
-        modules = [ pkvmHostOnlyModule ];
+        modules = [ pkvmDebugModule ];
       };
       package = hostConfiguration.config.system.build.ghafImage;
     };
@@ -632,7 +677,7 @@ let
     ++ (map generate-nodemoapps all-target-configs)
     ++ (map generate-luks luksable-target-configs)
     ++ (map (t: generate-luks (generate-nodemoapps t)) luksable-target-configs)
-    ++ [ pkvmHostOnlyTarget ];
+    ++ [ pkvmDebugTarget ];
   crossTargets = map generate-cross-from-x86_64 targets;
   flashTarget =
     t: qspiOnly:
