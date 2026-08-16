@@ -48,6 +48,16 @@ in
         pool instead of exposing private guest memory to host backends.
       '';
     };
+
+    allowDeviceAssignment = lib.mkOption {
+      type = lib.types.bool;
+      default = false;
+      description = ''
+        Allow devices using Crosvm's pKVM IOMMU path in this protected guest.
+        This is an experimental target-specific opt-in and requires a host
+        pKVM backend that implements protected device assignment and reset.
+      '';
+    };
   };
 
   config.assertions = lib.optionals cfg.guest.enable [
@@ -84,8 +94,18 @@ in
       message = "Crosvm protected MicroVMs cannot use host shared-directory backends.";
     }
     {
-      assertion = !isProtected || cfg.devices == [ ];
-      message = "Crosvm protected MicroVM device assignment is not supported by the upstream pKVM backend.";
+      assertion = !protection.allowDeviceAssignment || isProtected;
+      message = "Protected device assignment requires a protected Crosvm mode.";
+    }
+    {
+      assertion =
+        !protection.allowDeviceAssignment
+        || lib.all ({ crosvm, ... }: crosvm.iommu == "pkvm-iommu") cfg.devices;
+      message = "Protected device assignment requires `iommu = \"pkvm-iommu\"` for every assigned device.";
+    }
+    {
+      assertion = !isProtected || cfg.devices == [ ] || protection.allowDeviceAssignment;
+      message = "Crosvm protected MicroVM device assignment requires an explicit backend opt-in.";
     }
     {
       assertion = !isProtected || !cfg.graphics.enable;

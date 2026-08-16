@@ -204,6 +204,29 @@ let
       };
     }
   ];
+  protectedWithAssignedDevice = makeConfig "aarch64-linux" [
+    {
+      microvm = {
+        crosvm = {
+          deviceTreeOverlays = [ "mgbe0.dtbo" ];
+          protection = {
+            mode = "protected-without-firmware";
+            allowDeviceAssignment = true;
+          };
+        };
+        devices = [
+          {
+            bus = "platform";
+            path = "6800000.ethernet";
+            crosvm = {
+              dtSymbol = "mgbe0";
+              iommu = "pkvm-iommu";
+            };
+          }
+        ];
+      };
+    }
+  ];
   protectedWithShare = makeConfig "aarch64-linux" [
     {
       microvm = {
@@ -258,6 +281,7 @@ assert assertionsPass layout;
 assert assertionsPass protected;
 assert assertionsPass protectedWithFirmware;
 assert assertionsPass protectedWithLargerSwiotlb;
+assert assertionsPass protectedWithAssignedDevice;
 assert !assertionsPass missingSymbol;
 assert !assertionsPass missingOverlay;
 assert !assertionsPass unsupportedHypervisor;
