@@ -122,12 +122,50 @@ let
     {
       # Diagnose protected host mode independently of guest startup. The
       # ordinary accelerated GUI target remains the rollback image.
-      boot.kernelParams = [ "kvm-arm.mode=protected" ];
+      boot.kernelParams = [
+        "kvm-arm.mode=protected"
+        # Linux 7.1 selects protected hVHE on Orin by default. NVIDIA's TF-A
+        # suspend-state fix was developed and validated for protected nVHE;
+        # force that mode until the additional hVHE firmware state has been
+        # identified and preserved across PSCI CPU power-down.
+        "arm64_sw.hvhe=0"
+        "id_aa64mmfr1.vh=0"
+      ];
+
+      # The DSU PMU CPU-online callback accesses a system register that pKVM's
+      # protected hypervisor traps on Orin, causing an EL2 BUG and host panic. The
+      # host-only canary does not need DSU uncore performance counters.
+      boot.blacklistedKernelModules = [ "arm_dsu_pmu" ];
+
+      # NVIDIA's R36.5 TF-A loses the nVHE/pKVM timer, virtualization, and
+      # interrupt-control state when a CPU returns from PSCI power-down. Patch
+      # only this opt-in target's firmware source to preserve that state.
+      nixpkgs.overlays = [
+        (_final: prev: {
+          nvidia-jetpack = prev.nvidia-jetpack.overrideScope (
+            _finalJetpack: prevJetpack: {
+              gitRepos = prevJetpack.gitRepos // {
+                "tegra/optee-src/atf" = prev.applyPatches {
+                  name = "atf-pkvm";
+                  src = prevJetpack.gitRepos."tegra/optee-src/atf";
+                  patches = [
+                    ../../modules/reference/hardware/jetpack/nvidia-jetson-orin/pkvm/0001-tegra-t234-save-and-restore-virtualization-registers.patch
+                  ];
+                };
+              };
+            }
+          );
+        })
+      ];
 
       # Ghaf's boot-order module starts every configured VM regardless of the
       # microvm.nix autostart setting. Disable it for this host-only canary and
       # force every VM in this fixed target topology to remain stopped.
       ghaf.microvm-boot.enable = lib.mkForce false;
+      # balloon-manager is normally pulled into microvms.target and requires
+      # each ballooned AppVM's memory manager, which in turn requires the VM.
+      # Remove that indirect startup path for this host-only target.
+      systemd.services.balloon-manager.wantedBy = lib.mkForce [ ];
       microvm.vms = {
         "admin-vm".autostart = lib.mkForce false;
         "net-vm".autostart = lib.mkForce false;
