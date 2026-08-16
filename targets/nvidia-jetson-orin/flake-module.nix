@@ -57,6 +57,20 @@ let
       ];
     };
 
+  linux71PkvmAssignedGuestModule =
+    { lib, ... }:
+    {
+      boot.kernelPatches = [
+        {
+          name = "Arm pKVM protected device assignment";
+          patch = ../../modules/reference/hardware/jetpack/nvidia-jetson-orin/pkvm/patches-linux-7.1/0001-KVM-arm64-port-Android-pKVM-device-assignment.patch;
+          structuredExtraConfig = with lib.kernel; {
+            PKVM_PVIOMMU = yes;
+          };
+        }
+      ];
+    };
+
   netvmCrosvmVgicItsModule =
     { config, lib, ... }:
     {
@@ -170,6 +184,52 @@ let
       # pKVM canary does not need DSU uncore performance counters.
       boot.blacklistedKernelModules = [ "arm_dsu_pmu" ];
 
+      # Apply the Android 17 / Linux 6.18 protected-device implementation and
+      # its Tegra234 backend only to this Linux 7.1 pKVM canary.
+      boot.kernelPatches = [
+        {
+          name = "Arm pKVM protected device assignment";
+          patch = ../../modules/reference/hardware/jetpack/nvidia-jetson-orin/pkvm/patches-linux-7.1/0001-KVM-arm64-port-Android-pKVM-device-assignment.patch;
+        }
+        {
+          name = "Tegra234 pKVM SMMUv2 backend";
+          patch = ../../modules/reference/hardware/jetpack/nvidia-jetson-orin/pkvm/patches-linux-7.1/0002-KVM-arm64-add-Tegra234-SMMUv2-pKVM-backend.patch;
+        }
+        {
+          name = "Tegra protected-device stream-ID lock";
+          patch = ../../modules/reference/hardware/jetpack/nvidia-jetson-orin/pkvm/patches-linux-7.1/0003-KVM-arm64-lock-Tegra-stream-IDs-for-protected-device.patch;
+        }
+        {
+          name = "Tegra MGBE0 protected-device reset";
+          patch = ../../modules/reference/hardware/jetpack/nvidia-jetson-orin/pkvm/patches-linux-7.1/0004-KVM-arm64-reset-Tegra234-MGBE0-at-pKVM-handoff.patch;
+        }
+        {
+          name = "Tegra pKVM protected-device configuration";
+          patch = null;
+          structuredExtraConfig = with lib.kernel; {
+            ARM_SMMU = no;
+            ARM_SMMU_TEGRA_PKVM = yes;
+            IOMMU_POOL_PAGES = freeform "0x10000";
+            PKVM_PVIOMMU = yes;
+            VFIO_PKVM_IOMMU = yes;
+          };
+        }
+      ];
+
+      hardware.deviceTree.enable = true;
+      hardware.deviceTree.overlays = [
+        {
+          name = "mgbe0-protected-assignment";
+          dtsFile = ../../modules/reference/hardware/jetpack/nvidia-jetson-orin/pkvm/mgbe0-protected-assignment-overlay.dts;
+        }
+      ];
+
+      # PCI protected assignment needs a separate reset and ownership backend.
+      # Keep it out of the first platform-device canary while retaining MGBE0
+      # as NetVM's physical LAN interface.
+      ghaf.hardware.nvidia.orin.agx.enableNetvmWlanPCIPassthrough = lib.mkForce false;
+      ghaf.hardware.nvidia.passthroughs.mgbe0_net_vm.crosvmIommu = "pkvm-iommu";
+
       # NVIDIA's R36.5 TF-A loses the nVHE/pKVM timer, virtualization, and
       # interrupt-control state when a CPU returns from PSCI power-down. Patch
       # only this opt-in target's firmware source to preserve that state.
@@ -210,6 +270,13 @@ let
       # started while later protected guests are added to this same target.
       ghaf.virtualization.vmConfig.sysvms.adminvm.extraModules = [
         protectedVmWithoutFirmwareModule
+      ];
+      ghaf.virtualization.vmConfig.sysvms.netvm.extraModules = [
+        linux71PkvmAssignedGuestModule
+        protectedVmWithoutFirmwareModule
+        {
+          microvm.crosvm.protection.allowDeviceAssignment = true;
+        }
       ];
       ghaf.virtualization.vmConfig.appvms.chromium = {
         # Keep the browser's declared 6 GiB as its complete allocation. pKVM

@@ -1,0 +1,161 @@
+From f002d704e6308559159706efcd7f5f7018b7e460 Mon Sep 17 00:00:00 2001
+From: vadik likholetov <vadikas@gmail.com>
+Date: Mon, 17 Aug 2026 00:23:27 +0300
+Subject: [PATCH 4/4] KVM: arm64: reset Tegra234 MGBE0 at pKVM handoff
+
+Protected device assignment requires a trusted reset at both ownership transitions. Register an EL2-owned MGBE0 reset callback from the Tegra SMMUv2 backend and use the XGMAC DMA software reset after the device MMIO has been donated to the hypervisor.\n\nLeave power locking unimplemented. A powered-down or clock-gated controller therefore fails the reset and keeps assignment fail-closed.
+---
+ arch/arm64/kvm/hyp/include/nvhe/iommu.h    |  2 +
+ arch/arm64/kvm/hyp/nvhe/device/device.c    |  2 +
+ arch/arm64/kvm/hyp/nvhe/iommu/iommu.c      | 11 ++++
+ arch/arm64/kvm/hyp/nvhe/iommu/tegra-smmu.c | 58 ++++++++++++++++++++++
+ 4 files changed, 73 insertions(+)
+
+diff --git a/arch/arm64/kvm/hyp/include/nvhe/iommu.h b/arch/arm64/kvm/hyp/include/nvhe/iommu.h
+index 5a413aef0..3357a1b79 100644
+--- a/arch/arm64/kvm/hyp/include/nvhe/iommu.h
++++ b/arch/arm64/kvm/hyp/include/nvhe/iommu.h
+@@ -27,6 +27,7 @@ int kvm_iommu_id_to_token(pkvm_handle_t smmu_id, u64 *out_token);
+ 
+ struct kvm_iommu_ops {
+ 	int (*init)(pkvm_handle_t drv_id);
++	void (*init_devices)(void);
+ 	int (*host_stage2_idmap)(phys_addr_t start, phys_addr_t end, int prot);
+ 	int (*attach_dev)(pkvm_handle_t iommu, struct kvm_hyp_iommu_domain *domain,
+ 			  pkvm_handle_t dev, u32 pasid, u32 pasid_bits, unsigned long flags);
+@@ -64,6 +65,7 @@ struct kvm_iommu_ops {
+ 
+ int kvm_iommu_init(void *pool_base, size_t nr_pages);
+ int kvm_iommu_register_ops(struct kvm_iommu_ops *ops, pkvm_handle_t *drv_id);
++void kvm_iommu_init_devices(void);
+ 
+ int kvm_iommu_host_stage2_idmap(phys_addr_t start, phys_addr_t end,
+ 				 enum kvm_pgtable_prot prot);
+diff --git a/arch/arm64/kvm/hyp/nvhe/device/device.c b/arch/arm64/kvm/hyp/nvhe/device/device.c
+index aadc8e379..fb04b567d 100644
+--- a/arch/arm64/kvm/hyp/nvhe/device/device.c
++++ b/arch/arm64/kvm/hyp/nvhe/device/device.c
+@@ -39,6 +39,8 @@ int pkvm_init_devices(void)
+ 				     dev_sz >> PAGE_SHIFT);
+ 	if (ret)
+ 		registered_devices_nr = 0;
++	else
++		kvm_iommu_init_devices();
+ 	return ret;
+ }
+ 
+diff --git a/arch/arm64/kvm/hyp/nvhe/iommu/iommu.c b/arch/arm64/kvm/hyp/nvhe/iommu/iommu.c
+index 988424725..ed153d6c0 100644
+--- a/arch/arm64/kvm/hyp/nvhe/iommu/iommu.c
++++ b/arch/arm64/kvm/hyp/nvhe/iommu/iommu.c
+@@ -225,6 +225,17 @@ int kvm_iommu_register_ops(struct kvm_iommu_ops *ops, pkvm_handle_t *drv_id)
+ 	return ret;
+ }
+ 
++void kvm_iommu_init_devices(void)
++{
++	struct kvm_iommu_ops *ops;
++
++	kvm_iommu_drv_lock();
++	for_each_drv(ops)
++		if (ops->init_devices)
++			ops->init_devices();
++	kvm_iommu_drv_unlock();
++}
++
+ int kvm_iommu_host_stage2_idmap(phys_addr_t start, phys_addr_t end, enum kvm_pgtable_prot prot)
+ {
+ 	struct kvm_iommu_ops *kvm_iommu_ops;
+diff --git a/arch/arm64/kvm/hyp/nvhe/iommu/tegra-smmu.c b/arch/arm64/kvm/hyp/nvhe/iommu/tegra-smmu.c
+index 191daf242..f7596586b 100644
+--- a/arch/arm64/kvm/hyp/nvhe/iommu/tegra-smmu.c
++++ b/arch/arm64/kvm/hyp/nvhe/iommu/tegra-smmu.c
+@@ -14,6 +14,7 @@
+ #include <linux/io.h>
+ #include <linux/iommu.h>
+ 
++#include <kvm/device.h>
+ #include <kvm/tegra-smmu-pkvm.h>
+ 
+ #include <nvhe/alloc.h>
+@@ -24,6 +25,14 @@
+ #include <nvhe/spinlock.h>
+ 
+ #define PKVM_TEGRA_TLB_SPINS		1000000
++#define PKVM_TEGRA_MGBE_RESET_SPINS	2000000
++
++#define PKVM_TEGRA_MGBE0_HV_BASE	0x06800000
++#define PKVM_TEGRA_MGBE0_MAC_BASE	0x06810000
++
++#define PKVM_TEGRA_MGBE_WRAP_INTR_ENABLE	0x8704
++#define PKVM_TEGRA_MGBE_DMA_MODE		0x3000
++#define PKVM_TEGRA_MGBE_DMA_MODE_SWR	BIT(0)
+ 
+ struct pkvm_tegra_hyp_smmu {
+ 	struct pkvm_tegra_smmu_device *params;
+@@ -53,6 +62,54 @@ static struct pkvm_tegra_hyp_domain tegra_identity_domain;
+ static struct kvm_pgtable_mm_ops tegra_identity_mm_ops;
+ static struct kvm_pgtable_mm_ops tegra_domain_mm_ops;
+ 
++struct pkvm_tegra_mgbe {
++	phys_addr_t hv_base;
++	phys_addr_t mac_base;
++};
++
++static struct pkvm_tegra_mgbe tegra_mgbe0 = {
++	.hv_base = PKVM_TEGRA_MGBE0_HV_BASE,
++	.mac_base = PKVM_TEGRA_MGBE0_MAC_BASE,
++};
++
++static int tegra_mgbe_reset(void *cookie, bool host_to_guest)
++{
++	struct pkvm_tegra_mgbe *mgbe = cookie;
++	void __iomem *mac = hyp_phys_to_virt(mgbe->mac_base);
++	u32 value;
++	unsigned int spin;
++
++	(void)host_to_guest;
++
++	/* The guest driver restores this wrapper interrupt gate. */
++	writel_relaxed(0, mac + PKVM_TEGRA_MGBE_WRAP_INTR_ENABLE);
++	value = readl_relaxed(mac + PKVM_TEGRA_MGBE_DMA_MODE);
++	writel_relaxed(value | PKVM_TEGRA_MGBE_DMA_MODE_SWR,
++		       mac + PKVM_TEGRA_MGBE_DMA_MODE);
++
++	for (spin = 0; spin < PKVM_TEGRA_MGBE_RESET_SPINS; spin++) {
++		value = readl_relaxed(mac + PKVM_TEGRA_MGBE_DMA_MODE);
++		if (!(value & PKVM_TEGRA_MGBE_DMA_MODE_SWR))
++			return 0;
++		cpu_relax();
++	}
++
++	return -ETIMEDOUT;
++}
++
++static struct pkvm_device_ops tegra_mgbe_ops = {
++	.reset = tegra_mgbe_reset,
++};
++
++static void tegra_init_devices(void)
++{
++	int ret;
++
++	ret = pkvm_device_register_ops(tegra_mgbe0.hv_base, &tegra_mgbe_ops,
++				       &tegra_mgbe0);
++	WARN_ON(ret && ret != -ENODEV);
++}
++
+ static void __iomem *tegra_smmu_page(struct pkvm_tegra_hyp_smmu *smmu,
+ 				     unsigned int instance,
+ 				     unsigned int page)
+@@ -777,6 +834,7 @@ static int tegra_init(pkvm_handle_t driver_id)
+ 
+ struct kvm_iommu_ops pkvm_tegra_smmu_ops = {
+ 	.init = tegra_init,
++	.init_devices = tegra_init_devices,
+ 	.host_stage2_idmap = tegra_host_stage2_idmap,
+ 	.alloc_domain = tegra_alloc_domain,
+ 	.free_domain = tegra_free_domain,
+-- 
+2.55.0
+

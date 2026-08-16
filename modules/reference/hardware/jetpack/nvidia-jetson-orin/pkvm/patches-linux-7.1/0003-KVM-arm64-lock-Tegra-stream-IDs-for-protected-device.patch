@@ -1,0 +1,271 @@
+From 6c8fe50ac1684112c711d5ccb00a39ad96c08401 Mon Sep 17 00:00:00 2001
+From: vadik likholetov <vadikas@gmail.com>
+Date: Mon, 17 Aug 2026 00:23:15 +0300
+Subject: [PATCH 3/4] KVM: arm64: lock Tegra stream IDs for protected devices
+
+Tegra234 memory clients can override the stream ID presented to the SMMU. A hostile host could otherwise rewrite the stream ID of an assigned device and route its DMA through a host identity context.\n\nAdd a generic IOMMU preparation callback and use it to program, lock, and verify the Tegra MC stream-ID overrides before the host loses privilege. Abort protected-device initialization when a required lock cannot be established.
+---
+ arch/arm64/include/asm/kvm_host.h   |  2 +
+ arch/arm64/kvm/iommu.c              | 18 ++++++++
+ arch/arm64/kvm/pkvm.c               | 11 +++++
+ drivers/iommu/arm-smmu-tegra-pkvm.c | 15 +++++++
+ drivers/memory/tegra/mc.c           |  9 ++++
+ drivers/memory/tegra/tegra186.c     | 65 +++++++++++++++++++++++++++++
+ include/soc/tegra/mc.h              |  8 ++++
+ 7 files changed, 128 insertions(+)
+
+diff --git a/arch/arm64/include/asm/kvm_host.h b/arch/arm64/include/asm/kvm_host.h
+index f6ab16da6..f0fb17ec1 100644
+--- a/arch/arm64/include/asm/kvm_host.h
++++ b/arch/arm64/include/asm/kvm_host.h
+@@ -1885,6 +1885,7 @@ struct kvm_iommu_driver {
+ 	int (*get_device_iommu_num_ids)(struct device *dev);
+ 	int (*get_device_iommu_id)(struct device *dev, u32 id,
+ 				   pkvm_handle_t *out_iommu, u32 *out_sid);
++	int (*prepare_protected_device)(struct device *dev);
+ 	int (*get_iommu_endpoint)(struct of_phandle_args *iommu_spec,
+ 				  u64 *out_endpoint);
+ 	struct list_head node;
+@@ -1910,6 +1911,7 @@ size_t kvm_iommu_pages(void);
+ int kvm_get_iommu_id_by_of(struct device_node *np, pkvm_handle_t *out_id);
+ int kvm_get_iommu_endpoint(struct of_phandle_args *iommu_spec,
+ 			   u64 *out_endpoint);
++int kvm_iommu_prepare_protected_device(struct device *dev);
+ 
+ int pkvm_iommu_resume(int device_id);
+ int pkvm_iommu_suspend(int device_id);
+diff --git a/arch/arm64/kvm/iommu.c b/arch/arm64/kvm/iommu.c
+index 39ec82250..eb3f57290 100644
+--- a/arch/arm64/kvm/iommu.c
++++ b/arch/arm64/kvm/iommu.c
+@@ -425,6 +425,24 @@ int kvm_get_iommu_endpoint(struct of_phandle_args *iommu_spec, u64 *out_endpoint
+ 	return ret;
+ }
+ 
++int kvm_iommu_prepare_protected_device(struct device *dev)
++{
++	struct kvm_iommu_driver *driver;
++	int ret = 0;
++
++	mutex_lock(&kvm_iommu_reg_lock);
++	list_for_each_entry(driver, &kvm_iommu_drivers, node) {
++		if (!driver->prepare_protected_device)
++			continue;
++		ret = driver->prepare_protected_device(dev);
++		if (ret)
++			break;
++	}
++	mutex_unlock(&kvm_iommu_reg_lock);
++
++	return ret;
++}
++
+ int kvm_iommu_device_num_ids(struct device *dev)
+ {
+ 	int ret = 0;
+diff --git a/arch/arm64/kvm/pkvm.c b/arch/arm64/kvm/pkvm.c
+index b1e90ef31..060cbfb00 100644
+--- a/arch/arm64/kvm/pkvm.c
++++ b/arch/arm64/kvm/pkvm.c
+@@ -13,6 +13,7 @@
+ #include <linux/memblock.h>
+ #include <linux/mutex.h>
+ #include <linux/of_address.h>
++#include <linux/of_platform.h>
+ #include <linux/platform_device.h>
+ 
+ #include <asm/kvm_pkvm.h>
+@@ -298,6 +299,7 @@ static int pkvm_register_device(struct of_phandle_args *args,
+ 				struct pkvm_device *dev)
+ {
+ 	struct device_node *np = args->np;
++	struct platform_device *pdev;
+ 	struct of_phandle_args iommu_spec;
+ 	u32 group_id = args->args[0];
+ 	struct resource res;
+@@ -349,6 +351,15 @@ static int pkvm_register_device(struct of_phandle_args *args,
+ 
+ 	dev->nr_iommus = idx;
+ 	dev->group_id = group_id;
++
++	pdev = of_find_device_by_node(np);
++	if (!pdev)
++		return -ENODEV;
++	ret = kvm_iommu_prepare_protected_device(&pdev->dev);
++	put_device(&pdev->dev);
++	if (ret)
++		return ret;
++
+ 	return 0;
+ }
+ 
+diff --git a/drivers/iommu/arm-smmu-tegra-pkvm.c b/drivers/iommu/arm-smmu-tegra-pkvm.c
+index ecba139f1..e20e9ec44 100644
+--- a/drivers/iommu/arm-smmu-tegra-pkvm.c
++++ b/drivers/iommu/arm-smmu-tegra-pkvm.c
+@@ -504,11 +504,26 @@ static int pkvm_tegra_device_id(struct device *dev, u32 idx,
+ 	return 0;
+ }
+ 
++static int pkvm_tegra_prepare_protected_device(struct device *dev)
++{
++	struct iommu_fwspec *fwspec = dev_iommu_fwspec_get(dev);
++	struct pkvm_tegra_host_smmu *smmu;
++
++	if (!fwspec)
++		return 0;
++	smmu = pkvm_tegra_smmu_from_fwnode(fwspec->iommu_fwnode);
++	if (!smmu)
++		return 0;
++
++	return tegra_mc_lock_device_stream_id(smmu->mc, dev);
++}
++
+ static struct kvm_iommu_driver pkvm_tegra_driver = {
+ 	.init_driver = pkvm_tegra_init_driver,
+ 	.get_iommu_id_by_of = pkvm_tegra_get_iommu_id_by_of,
+ 	.get_device_iommu_num_ids = pkvm_tegra_device_num_ids,
+ 	.get_device_iommu_id = pkvm_tegra_device_id,
++	.prepare_protected_device = pkvm_tegra_prepare_protected_device,
+ };
+ 
+ static int __init pkvm_tegra_register(void)
+diff --git a/drivers/memory/tegra/mc.c b/drivers/memory/tegra/mc.c
+index 64e41338c..16dc7ffe6 100644
+--- a/drivers/memory/tegra/mc.c
++++ b/drivers/memory/tegra/mc.c
+@@ -129,6 +129,15 @@ int tegra_mc_probe_device(struct tegra_mc *mc, struct device *dev)
+ }
+ EXPORT_SYMBOL_GPL(tegra_mc_probe_device);
+ 
++int tegra_mc_lock_device_stream_id(struct tegra_mc *mc, struct device *dev)
++{
++	if (mc->soc->ops && mc->soc->ops->lock_device_stream_id)
++		return mc->soc->ops->lock_device_stream_id(mc, dev);
++
++	return -EOPNOTSUPP;
++}
++EXPORT_SYMBOL_GPL(tegra_mc_lock_device_stream_id);
++
+ int tegra_mc_get_carveout_info(struct tegra_mc *mc, unsigned int id,
+                                phys_addr_t *base, u64 *size)
+ {
+diff --git a/drivers/memory/tegra/tegra186.c b/drivers/memory/tegra/tegra186.c
+index 91d561656..5229d88b5 100644
+--- a/drivers/memory/tegra/tegra186.c
++++ b/drivers/memory/tegra/tegra186.c
+@@ -154,6 +154,70 @@ static int tegra186_mc_probe_device(struct tegra_mc *mc, struct device *dev)
+ 	return 0;
+ }
+ 
++static int tegra186_mc_lock_client_sid(struct tegra_mc *mc,
++				       const struct tegra_mc_client *client,
++				       unsigned int sid)
++{
++	u32 value;
++
++	if (!client->regs.sid.security && !client->regs.sid.override)
++		return 0;
++
++	tegra186_mc_client_sid_override(mc, client, sid);
++	value = readl(mc->regs + client->regs.sid.override);
++	if ((value & MC_SID_STREAMID_OVERRIDE_MASK) != sid)
++		return -EPERM;
++
++	value = readl(mc->regs + client->regs.sid.security);
++	value |= MC_SID_STREAMID_SECURITY_WRITE_ACCESS_DISABLED;
++	writel(value, mc->regs + client->regs.sid.security);
++	value = readl(mc->regs + client->regs.sid.security);
++	if (!(value & MC_SID_STREAMID_SECURITY_WRITE_ACCESS_DISABLED))
++		return -EACCES;
++
++	return 0;
++}
++
++static int
++tegra186_mc_lock_device_stream_id(struct tegra_mc *mc, struct device *dev)
++{
++#if IS_ENABLED(CONFIG_IOMMU_API)
++	struct of_phandle_args args;
++	unsigned long flags;
++	unsigned int i, index = 0;
++	u32 sid;
++	int err = 0;
++
++	if (!tegra_dev_iommu_get_stream_id(dev, &sid))
++		return -EINVAL;
++	sid &= MC_SID_STREAMID_OVERRIDE_MASK;
++
++	while (!of_parse_phandle_with_args(dev->of_node, "interconnects",
++					   "#interconnect-cells", index++, &args)) {
++		if (args.np == mc->dev->of_node && args.args_count) {
++			for (i = 0; i < mc->soc->num_clients; i++) {
++				const struct tegra_mc_client *client =
++					&mc->soc->clients[i];
++
++				if (client->id != args.args[0])
++					continue;
++				spin_lock_irqsave(&mc->lock, flags);
++				err = tegra186_mc_lock_client_sid(mc, client, sid);
++				spin_unlock_irqrestore(&mc->lock, flags);
++				break;
++			}
++		}
++		of_node_put(args.np);
++		if (err)
++			break;
++	}
++
++	return err;
++#else
++	return -EOPNOTSUPP;
++#endif
++}
++
+ static int tegra186_mc_resume(struct tegra_mc *mc)
+ {
+ #if IS_ENABLED(CONFIG_IOMMU_API)
+@@ -174,6 +238,7 @@ const struct tegra_mc_ops tegra186_mc_ops = {
+ 	.remove = tegra186_mc_remove,
+ 	.resume = tegra186_mc_resume,
+ 	.probe_device = tegra186_mc_probe_device,
++	.lock_device_stream_id = tegra186_mc_lock_device_stream_id,
+ };
+ 
+ #if defined(CONFIG_ARCH_TEGRA_186_SOC)
+diff --git a/include/soc/tegra/mc.h b/include/soc/tegra/mc.h
+index e6da035d1..57354c6b5 100644
+--- a/include/soc/tegra/mc.h
++++ b/include/soc/tegra/mc.h
+@@ -166,6 +166,7 @@ struct tegra_mc_ops {
+ 	void (*remove)(struct tegra_mc *mc);
+ 	int (*resume)(struct tegra_mc *mc);
+ 	int (*probe_device)(struct tegra_mc *mc, struct device *dev);
++	int (*lock_device_stream_id)(struct tegra_mc *mc, struct device *dev);
+ };
+ 
+ struct tegra_mc_regs {
+@@ -261,6 +262,7 @@ unsigned int tegra_mc_get_emem_device_count(struct tegra_mc *mc);
+ #ifdef CONFIG_TEGRA_MC
+ struct tegra_mc *devm_tegra_memory_controller_get(struct device *dev);
+ int tegra_mc_probe_device(struct tegra_mc *mc, struct device *dev);
++int tegra_mc_lock_device_stream_id(struct tegra_mc *mc, struct device *dev);
+ int tegra_mc_get_carveout_info(struct tegra_mc *mc, unsigned int id,
+                                phys_addr_t *base, u64 *size);
+ #else
+@@ -276,6 +278,12 @@ tegra_mc_probe_device(struct tegra_mc *mc, struct device *dev)
+ 	return -ENODEV;
+ }
+ 
++static inline int
++tegra_mc_lock_device_stream_id(struct tegra_mc *mc, struct device *dev)
++{
++	return -ENODEV;
++}
++
+ static inline int
+ tegra_mc_get_carveout_info(struct tegra_mc *mc, unsigned int id,
+                            phys_addr_t *base, u64 *size)
+-- 
+2.55.0
+

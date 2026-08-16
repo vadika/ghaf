@@ -145,6 +145,26 @@ SPDX-FileCopyrightText = "Copyright (c) NVIDIA CORPORATION"
 precedence = "override"
 path = "modules/reference/hardware/jetpack/nvidia-jetson-orin/virtualization/passthrough/gpu-vm/nv-dt-bindings/**"
 
+# The pKVM patch series contains complete kernel diffs and therefore embeds
+# SPDX tags from every touched source file. Treat the series as GPL-2.0-only,
+# matching the kernel code being carried, instead of scanning nested tags.
+[[annotations]]
+SPDX-License-Identifier = "GPL-2.0-only"
+SPDX-FileCopyrightText = [
+  "Copyright 2023-2026 Google LLC and the Android kernel contributors",
+  "Copyright 2026 TII (SSRC) and the Ghaf contributors",
+]
+precedence = "override"
+path = "modules/reference/hardware/jetpack/nvidia-jetson-orin/pkvm/patches-linux-7.1/*.patch"
+
+# This Nix module embeds a generated GPL-tagged kernel Makefile as a string;
+# the module file itself is Apache-2.0 as declared by its header.
+[[annotations]]
+SPDX-License-Identifier = "Apache-2.0"
+SPDX-FileCopyrightText = "2022-2026 TII (SSRC) and the Ghaf contributors"
+precedence = "override"
+path = "modules/reference/hardware/jetpack/nvidia-jetson-orin/virtualization/common/dce-virt-common/dce-probe-host.nix"
+
 [[annotations]]
 SPDX-License-Identifier = "LicenseRef-NvidiaProprietary"
 SPDX-FileCopyrightText = "Copyright (c) 2023-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved."
