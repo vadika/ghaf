@@ -89,9 +89,9 @@ let
 
       # Start with direct kernel boot so guest-memory isolation can be tested
       # independently of pVM firmware and secret provisioning.
-      microvm.crosvm.extraArgs = lib.mkIf (config.microvm.hypervisor == "crosvm") [
-        "--protected-vm-without-firmware"
-      ];
+      microvm.crosvm.protection.mode = lib.mkIf (
+        config.microvm.hypervisor == "crosvm"
+      ) "protected-without-firmware";
 
       # A vhost-user backend maps guest memory into a separate host process.
       # With upstream pKVM, an access outside the guest-shared restricted DMA
@@ -211,6 +211,20 @@ let
       ghaf.virtualization.vmConfig.sysvms.adminvm.extraModules = [
         protectedVmWithoutFirmwareModule
       ];
+      ghaf.virtualization.vmConfig.appvms.chromium = {
+        # Keep the browser's declared 6 GiB as its complete allocation. pKVM
+        # does not support Ghaf's balloon lifecycle yet, and the default ratio
+        # would otherwise reserve 18 GiB for this canary.
+        balloonRatio = 0;
+        extraModules = [
+          protectedVmWithoutFirmwareModule
+          {
+            # XDG item exchange is backed by virtio-fs. Removing the protected
+            # guest's host shares also requires disabling its mount declarations.
+            ghaf.xdgitems.enable = lib.mkForce false;
+          }
+        ];
+      };
       microvm.vms = {
         "admin-vm".autostart = lib.mkForce false;
         "net-vm".autostart = lib.mkForce false;
