@@ -1,0 +1,297 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Vadim Kochan <vadim4j@gmail.com>
+Date: Tue, 18 Aug 2026 02:45:00 +0300
+Subject: [PATCH] KVM: arm64: report Tegra pKVM SMMU state
+
+Add a setup-only diagnostic hypercall that lets the Tegra host driver read
+the identity domain, context-bank registers, stream routing, and selected
+page-table leaves before pKVM finalization.  This makes it possible to
+compare the EL2 software state with what the SMMU hardware actually sees
+when SDMMC faults during early boot.
+
+Keep the hypercall plumbing generic and make the diagnostic implementation
+an optional IOMMU-driver callback.  The host currently reports the data at
+info level for the three Tegra SMMUs while the bring-up target is enabled.
+
+Signed-off-by: Vadim Kochan <vadim4j@gmail.com>
+---
+ arch/arm64/include/asm/kvm_asm.h              |  1 +
+ arch/arm64/include/asm/kvm_host.h             |  2 +
+ arch/arm64/kvm/hyp/include/nvhe/iommu.h       |  4 +
+ arch/arm64/kvm/hyp/nvhe/hyp-main.c            | 14 +++
+ arch/arm64/kvm/hyp/nvhe/iommu/iommu.c         | 10 ++
+ arch/arm64/kvm/hyp/nvhe/iommu/tegra-smmu.c    | 95 +++++++++++++++++++
+ arch/arm64/kvm/iommu.c                        | 15 +++
+ drivers/iommu/arm-smmu-tegra-pkvm.c           | 20 +++-
+ 8 files changed, 159 insertions(+), 2 deletions(-)
+
+diff --git a/arch/arm64/include/asm/kvm_asm.h b/arch/arm64/include/asm/kvm_asm.h
+index 6a3d26344624..7528260fc65c 100644
+--- a/arch/arm64/include/asm/kvm_asm.h
++++ b/arch/arm64/include/asm/kvm_asm.h
+@@ -92,6 +92,7 @@ enum __kvm_host_smccc_func {
+ 	__KVM_HOST_SMCCC_FUNC___vgic_v5_save_apr,
+ 	__KVM_HOST_SMCCC_FUNC___vgic_v5_restore_vmcr_apr,
+ 	__KVM_HOST_SMCCC_FUNC___pkvm_iommu_register_ops,
++	__KVM_HOST_SMCCC_FUNC___pkvm_iommu_debug_read,
+ 	__KVM_HOST_SMCCC_FUNC___pkvm_devices_init,
+ 	__KVM_HOST_SMCCC_FUNC___pkvm_host_iommu_set_identity,
+ 
+diff --git a/arch/arm64/include/asm/kvm_host.h b/arch/arm64/include/asm/kvm_host.h
+index e0c7e7958d4d..3a340b6a4781 100644
+--- a/arch/arm64/include/asm/kvm_host.h
++++ b/arch/arm64/include/asm/kvm_host.h
+@@ -1907,6 +1907,8 @@ int kvm_iommu_init(void);
+ int kvm_iommu_init_driver(void);
+ int kvm_iommu_register_hyp_ops(struct kvm_iommu_ops *hyp_ops,
+ 			       pkvm_handle_t *drv_id);
++int kvm_iommu_debug_read(pkvm_handle_t drv_id, pkvm_handle_t iommu_id,
++			 u32 selector, u64 *value0, u64 *value1);
+ size_t kvm_iommu_pages(void);
+ int kvm_get_iommu_id_by_of(struct device_node *np, pkvm_handle_t *out_id);
+ int kvm_get_iommu_endpoint(struct of_phandle_args *iommu_spec,
+diff --git a/arch/arm64/kvm/hyp/include/nvhe/iommu.h b/arch/arm64/kvm/hyp/include/nvhe/iommu.h
+index 1aa371b6a947..297a08192e6e 100644
+--- a/arch/arm64/kvm/hyp/include/nvhe/iommu.h
++++ b/arch/arm64/kvm/hyp/include/nvhe/iommu.h
+@@ -58,6 +58,8 @@ struct kvm_iommu_ops {
+ 	int (*dev_block_dma)(pkvm_handle_t iommu, u32 endpoint_id,
+ 			     bool is_host_to_guest);
+ 	int (*get_iommu_token_by_id)(pkvm_handle_t smmu_id, u64 *out_token);
++	int (*debug_read)(pkvm_handle_t iommu, u32 selector,
++			  u64 *value0, u64 *value1);
+ 	void (*iotlb_inv_nested_domain)(struct kvm_hyp_iommu_domain *domain, unsigned long iova,
+ 					size_t size, size_t granule, bool leaf);
+ 	int (*nested_cfg_sync)(pkvm_handle_t iommu, void *cmd_desc, size_t cmd_desc_size);
+@@ -67,6 +69,8 @@ struct kvm_iommu_ops {
+ 
+ int kvm_iommu_init(void *pool_base, size_t nr_pages);
+ int kvm_iommu_register_ops(struct kvm_iommu_ops *ops, pkvm_handle_t *drv_id);
++int kvm_iommu_debug_read(pkvm_handle_t drv_id, pkvm_handle_t iommu_id,
++			 u32 selector, u64 *value0, u64 *value1);
+ void kvm_iommu_init_devices(void);
+ 
+ int kvm_iommu_host_stage2_idmap(phys_addr_t start, phys_addr_t end,
+diff --git a/arch/arm64/kvm/hyp/nvhe/hyp-main.c b/arch/arm64/kvm/hyp/nvhe/hyp-main.c
+index ca8d71d2649a..e1c3fb6ccb55 100644
+--- a/arch/arm64/kvm/hyp/nvhe/hyp-main.c
++++ b/arch/arm64/kvm/hyp/nvhe/hyp-main.c
+@@ -672,6 +672,19 @@ static void handle___pkvm_iommu_register_ops(struct kvm_cpu_context *host_ctxt)
+ 	cpu_reg(host_ctxt, 2) = drv_id;
+ }
+ 
++static void handle___pkvm_iommu_debug_read(struct kvm_cpu_context *host_ctxt)
++{
++	DECLARE_REG(pkvm_handle_t, drv_id, host_ctxt, 1);
++	DECLARE_REG(pkvm_handle_t, iommu_id, host_ctxt, 2);
++	DECLARE_REG(u32, selector, host_ctxt, 3);
++	u64 value0 = 0, value1 = 0;
++
++	cpu_reg(host_ctxt, 1) = kvm_iommu_debug_read(drv_id, iommu_id,
++						     selector, &value0, &value1);
++	cpu_reg(host_ctxt, 2) = value0;
++	cpu_reg(host_ctxt, 3) = value1;
++}
++
+ static void handle___pkvm_devices_init(struct kvm_cpu_context *host_ctxt)
+ {
+ 	cpu_reg(host_ctxt, 1) = pkvm_init_devices();
+@@ -1041,6 +1054,7 @@ static const hcall_t host_hcall[] = {
+ 	HANDLE_FUNC(__vgic_v5_save_apr),
+ 	HANDLE_FUNC(__vgic_v5_restore_vmcr_apr),
+ 	HANDLE_FUNC(__pkvm_iommu_register_ops),
++	HANDLE_FUNC(__pkvm_iommu_debug_read),
+ 	HANDLE_FUNC(__pkvm_devices_init),
+ 	HANDLE_FUNC(__pkvm_host_iommu_set_identity),
+ 
+diff --git a/arch/arm64/kvm/hyp/nvhe/iommu/iommu.c b/arch/arm64/kvm/hyp/nvhe/iommu/iommu.c
+index 989106489451..19976955bc63 100644
+--- a/arch/arm64/kvm/hyp/nvhe/iommu/iommu.c
++++ b/arch/arm64/kvm/hyp/nvhe/iommu/iommu.c
+@@ -229,6 +229,16 @@ int kvm_iommu_register_ops(struct kvm_iommu_ops *ops, pkvm_handle_t *drv_id)
+ 	return ret;
+ }
+ 
++int kvm_iommu_debug_read(pkvm_handle_t drv_id, pkvm_handle_t iommu_id,
++			 u32 selector, u64 *value0, u64 *value1)
++{
++	struct kvm_iommu_ops *ops = get_drv(drv_id);
++
++	if (!ops || !ops->debug_read)
++		return -EOPNOTSUPP;
++	return ops->debug_read(iommu_id, selector, value0, value1);
++}
++
+ void kvm_iommu_init_devices(void)
+ {
+ 	struct kvm_iommu_ops *ops;
+diff --git a/arch/arm64/kvm/hyp/nvhe/iommu/tegra-smmu.c b/arch/arm64/kvm/hyp/nvhe/iommu/tegra-smmu.c
+index 5dba4feeb21a..2628e788424f 100644
+--- a/arch/arm64/kvm/hyp/nvhe/iommu/tegra-smmu.c
++++ b/arch/arm64/kvm/hyp/nvhe/iommu/tegra-smmu.c
+@@ -850,6 +850,100 @@ static int tegra_smmu_init(pkvm_handle_t iommu_id, struct device *dev)
+ 	return 0;
+ }
+ 
++static int tegra_debug_leaf(u64 iova, u64 *value0, u64 *value1)
++{
++	struct pkvm_tegra_hyp_domain *domain = &tegra_identity_domain;
++	kvm_pte_t pte;
++	s8 level;
++	int ret;
++
++	ret = kvm_pgtable_get_leaf(&domain->pgt, iova, &pte, &level);
++	if (ret)
++		return ret;
++	*value0 = pte;
++	*value1 = (u64)(u8)level << 56;
++	if (kvm_pte_valid(pte))
++		*value1 |= kvm_pte_to_phys(pte) +
++			(iova & (kvm_granule_size(level) - 1));
++	return 0;
++}
++
++static int tegra_debug_read(pkvm_handle_t iommu_id, u32 selector,
++			    u64 *value0, u64 *value1)
++{
++	struct pkvm_tegra_hyp_domain *domain = &tegra_identity_domain;
++	struct pkvm_tegra_hyp_smmu *smmu = tegra_smmu_from_id(iommu_id);
++	void __iomem *cb;
++	unsigned int i;
++
++	if (!smmu)
++		return -ENODEV;
++	cb = tegra_smmu_cb(smmu, 0, domain->cb);
++	switch (selector) {
++	case 0:
++		*value0 = domain->mmu.vtcr;
++		*value1 = domain->mmu.pgd_phys;
++		return 0;
++	case 1:
++		*value0 = readl_relaxed(cb + PKVM_SMMU_CB_TCR);
++		*value1 = readq_relaxed(cb + PKVM_SMMU_CB_TTBR0);
++		return 0;
++	case 2:
++		*value0 = readl_relaxed(smmu->base[0] + PKVM_SMMU_GR0_SCR0);
++		*value1 = readl_relaxed(cb + PKVM_SMMU_CB_SCTLR);
++		return 0;
++	case 3:
++		*value0 = readl_relaxed(tegra_smmu_page(smmu, 0, 1) +
++				       PKVM_SMMU_GR1_CBAR(domain->cb));
++		*value1 = readl_relaxed(tegra_smmu_page(smmu, 0, 1) +
++				       PKVM_SMMU_GR1_CBA2R(domain->cb));
++		return 0;
++	case 4:
++		for (i = 0; i < smmu->params->num_mapping_groups; i++) {
++			u32 smr = readl_relaxed(tegra_smmu_page(smmu, 0, 0) +
++						PKVM_SMMU_GR0_SMR(i));
++
++			if ((smr & PKVM_SMMU_SMR_VALID) &&
++			    FIELD_GET(PKVM_SMMU_SMR_ID, smr) == 2) {
++				*value0 = ((u64)i << 32) | smr;
++				*value1 = readl_relaxed(
++					tegra_smmu_page(smmu, 0, 0) +
++					PKVM_SMMU_GR0_S2CR(i));
++				return 0;
++			}
++		}
++		return -ENOENT;
++	case 5:
++		return tegra_debug_leaf(0x00000003ffffff00ULL,
++					value0, value1);
++	case 6:
++		return tegra_debug_leaf(0x000000ffffffff00ULL,
++					value0, value1);
++	case 7:
++		*value0 = ((u64)domain->pgt.ia_bits << 32) |
++			  (u8)domain->pgt.start_level;
++		*value1 = kvm_pgtable_stage2_pgd_size(domain->mmu.vtcr);
++		return 0;
++	case 8:
++		if (smmu->params->num_instances < 2)
++			return -ENOENT;
++		cb = tegra_smmu_cb(smmu, 1, domain->cb);
++		*value0 = readl_relaxed(cb + PKVM_SMMU_CB_TCR);
++		*value1 = readq_relaxed(cb + PKVM_SMMU_CB_TTBR0);
++		return 0;
++	case 9:
++		if (smmu->params->num_instances < 2)
++			return -ENOENT;
++		cb = tegra_smmu_cb(smmu, 1, domain->cb);
++		*value0 = readl_relaxed(tegra_smmu_page(smmu, 1, 0) +
++				       PKVM_SMMU_GR0_SCR0);
++		*value1 = readl_relaxed(cb + PKVM_SMMU_CB_SCTLR);
++		return 0;
++	default:
++		return -EINVAL;
++	}
++}
++
+ static void tegra_snapshot_start(void)
+ {
+ 	tegra_snapshotting = true;
+@@ -976,4 +1070,5 @@ struct kvm_iommu_ops tegra_smmu_ops = {
+ 	.set_identity = tegra_set_identity,
+ 	.dev_block_dma = tegra_dev_block_dma,
+ 	.get_iommu_token_by_id = tegra_iommu_token,
++	.debug_read = tegra_debug_read,
+ };
+diff --git a/arch/arm64/kvm/iommu.c b/arch/arm64/kvm/iommu.c
+index 5848fc41defe..36e39e07aaa4 100644
+--- a/arch/arm64/kvm/iommu.c
++++ b/arch/arm64/kvm/iommu.c
+@@ -80,6 +80,21 @@ int kvm_iommu_register_hyp_ops(struct kvm_iommu_ops *hyp_ops,
+ }
+ EXPORT_SYMBOL(kvm_iommu_register_hyp_ops);
+ 
++int kvm_iommu_debug_read(pkvm_handle_t drv_id, pkvm_handle_t iommu_id,
++			 u32 selector, u64 *value0, u64 *value1)
++{
++	struct arm_smccc_res res;
++
++	res = kvm_call_hyp_nvhe_smccc(__pkvm_iommu_debug_read, drv_id,
++				       iommu_id, selector);
++	if ((int)res.a1)
++		return (int)res.a1;
++	*value0 = res.a2;
++	*value1 = res.a3;
++	return 0;
++}
++EXPORT_SYMBOL(kvm_iommu_debug_read);
++
+ int kvm_iommu_init_driver(void)
+ {
+ 	struct kvm_iommu_driver *driver;
+diff --git a/drivers/iommu/arm-smmu-tegra-pkvm.c b/drivers/iommu/arm-smmu-tegra-pkvm.c
+index 28ca7fac4735..41fa98341045 100644
+--- a/drivers/iommu/arm-smmu-tegra-pkvm.c
++++ b/drivers/iommu/arm-smmu-tegra-pkvm.c
+@@ -477,9 +477,23 @@ static int pkvm_tegra_smmu_init_driver(struct kvm_iommu_ops *hyp_ops)
+ 	ret = kvm_iommu_register_hyp_ops(hyp_ops, &pkvm_tegra_hyp_driver);
+ 	if (ret)
+ 		return ret;
++	ret = driver_for_each_device(&pkvm_tegra_smmu_driver.driver, NULL,
++				     NULL, pkvm_tegra_register_iommu);
++	if (ret)
++		return ret;
++	for (size_t iommu = 0; iommu < pkvm_tegra_smmu_count; iommu++) {
++		for (u32 selector = 0; selector < 10; selector++) {
++			u64 value0 = 0, value1 = 0;
+ 
+-	return driver_for_each_device(&pkvm_tegra_smmu_driver.driver, NULL,
+-				      NULL, pkvm_tegra_register_iommu);
++			ret = kvm_iommu_debug_read(pkvm_tegra_hyp_driver, iommu,
++						   selector, &value0, &value1);
++			pr_info("tegra-pkvm-debug: iommu=%zu selector=%u ret=%d value0=%#llx value1=%#llx\n",
++				iommu, selector, ret,
++				(unsigned long long)value0,
++				(unsigned long long)value1);
++		}
++	}
++	return 0;
+ }
+ 
+ static int pkvm_tegra_get_iommu_id_by_of(struct device_node *np,
+-- 
+2.51.0
+

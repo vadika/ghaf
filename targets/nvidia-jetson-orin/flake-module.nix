@@ -171,6 +171,10 @@ let
       # accelerated GUI target remains the rollback image.
       boot.kernelParams = [
         "kvm-arm.mode=protected"
+        # The protected identity DMA context uses physical addresses as IOVAs.
+        # Keep all host allocations below SDMMC's 34-bit DMA limit while the
+        # ordinary translated-domain path remains under investigation.
+        "mem=12G"
         # Linux 7.1 selects protected hVHE on Orin by default. NVIDIA's TF-A
         # suspend-state fix was developed and validated for protected nVHE;
         # force that mode until the additional hVHE firmware state has been
@@ -183,6 +187,16 @@ let
       # protected hypervisor traps on Orin, causing an EL2 BUG and host panic. The
       # pKVM canary does not need DSU uncore performance counters.
       boot.blacklistedKernelModules = [ "arm_dsu_pmu" ];
+
+      # Keep host-IOMMU debug iterations small. The combined GUI VM and the
+      # Chromium and Flatpak AppVMs do not participate in host eMMC/SMMU
+      # bring-up, and carrying their closures makes every destructive flash
+      # substantially larger. This is intentionally confined to the pKVM debug
+      # target; the accelerated GUI target remains the full-topology rollback.
+      ghaf.hardware.nvidia.passthroughs.gui_vm.enable = lib.mkForce false;
+      ghaf.virtualization.microvm.guivm.enable = lib.mkForce false;
+      ghaf.reference.appvms.chromium.enable = lib.mkForce false;
+      ghaf.reference.appvms.flatpak.enable = lib.mkForce false;
 
       # Apply the Android 17 / Linux 6.18 protected-device implementation and
       # its Tegra234 backend only to this Linux 7.1 pKVM canary.
@@ -202,6 +216,94 @@ let
         {
           name = "Tegra MGBE0 protected-device reset";
           patch = ../../modules/reference/hardware/jetpack/nvidia-jetson-orin/pkvm/patches-linux-7.1/0004-KVM-arm64-reset-Tegra234-MGBE0-at-pKVM-handoff.patch;
+        }
+        {
+          name = "Tegra234 pKVM SMMU register layout";
+          patch = ../../modules/reference/hardware/jetpack/nvidia-jetson-orin/pkvm/patches-linux-7.1/0005-KVM-arm64-support-Tegra234-SMMU-register-layout.patch;
+        }
+        {
+          name = "Tegra234 pKVM bounded host identity map";
+          patch = ../../modules/reference/hardware/jetpack/nvidia-jetson-orin/pkvm/patches-linux-7.1/0006-KVM-arm64-bound-Tegra234-host-idmap-granularity.patch;
+        }
+        {
+          name = "Arm pKVM host IOMMU snapshot boundary";
+          patch = ../../modules/reference/hardware/jetpack/nvidia-jetson-orin/pkvm/patches-linux-7.1/0007-KVM-arm64-bracket-host-IOMMU-stage-2-snapshot.patch;
+        }
+        {
+          name = "Tegra pKVM IOMMU registration diagnostics";
+          patch = ../../modules/reference/hardware/jetpack/nvidia-jetson-orin/pkvm/patches-linux-7.1/0008-iommu-report-pKVM-registration-failures.patch;
+        }
+        {
+          name = "Arm pKVM early identity routing";
+          patch = ../../modules/reference/hardware/jetpack/nvidia-jetson-orin/pkvm/patches-linux-7.1/0009-KVM-arm64-allow-identity-routing-during-pKVM-setup.patch;
+        }
+        {
+          name = "Tegra protected-device effective stream ID";
+          patch = ../../modules/reference/hardware/jetpack/nvidia-jetson-orin/pkvm/patches-linux-7.1/0010-memory-tegra-validate-the-effective-protected-device.patch;
+        }
+        {
+          name = "Tegra pKVM concatenated SMMUv2 root";
+          patch = ../../modules/reference/hardware/jetpack/nvidia-jetson-orin/pkvm/patches-linux-7.1/0011-KVM-arm64-use-the-SMMUv2-concatenated-root-layout.patch;
+        }
+        {
+          name = "Tegra pKVM non-coherent table walks";
+          patch = ../../modules/reference/hardware/jetpack/nvidia-jetson-orin/pkvm/patches-linux-7.1/0012-iommu-tegra-pkvm-trust-firmware-for-walk-coherency.patch;
+        }
+        {
+          name = "Tegra pKVM non-coherent VTCR attributes";
+          patch = ../../modules/reference/hardware/jetpack/nvidia-jetson-orin/pkvm/patches-linux-7.1/0013-KVM-arm64-program-non-coherent-Tegra-SMMU-walks.patch;
+        }
+        {
+          name = "Tegra pKVM SMMU diagnostics";
+          patch = ../../modules/reference/hardware/jetpack/nvidia-jetson-orin/pkvm/patches-linux-7.1/0014-KVM-arm64-report-Tegra-pKVM-SMMU-state.patch;
+        }
+        {
+          name = "Tegra pKVM translated DMA domains";
+          patch = ../../modules/reference/hardware/jetpack/nvidia-jetson-orin/pkvm/patches-linux-7.1/0015-iommu-tegra-pkvm-use-translated-DMA-domains-by-default.patch;
+        }
+        {
+          name = "Arm pKVM early host IOMMU domains";
+          patch = ../../modules/reference/hardware/jetpack/nvidia-jetson-orin/pkvm/patches-linux-7.1/0016-KVM-arm64-allow-host-IOMMU-domains-before-finalization.patch;
+        }
+        {
+          name = "Arm pKVM EL2 heap initialization";
+          patch = ../../modules/reference/hardware/jetpack/nvidia-jetson-orin/pkvm/patches-linux-7.1/0017-KVM-arm64-initialize-EL2-heap-during-pKVM-setup.patch;
+        }
+        {
+          name = "Tegra pKVM stream-ID IOMMU grouping";
+          patch = ../../modules/reference/hardware/jetpack/nvidia-jetson-orin/pkvm/patches-linux-7.1/0018-iommu-tegra-pkvm-group-devices-by-stream-ID.patch;
+        }
+        {
+          name = "Tegra pKVM translated DMA diagnostics";
+          patch = ../../modules/reference/hardware/jetpack/nvidia-jetson-orin/pkvm/patches-linux-7.1/0019-KVM-arm64-trace-Tegra-translated-DMA-domains.patch;
+        }
+        {
+          name = "Tegra pKVM hardware translation diagnostics";
+          patch = ../../modules/reference/hardware/jetpack/nvidia-jetson-orin/pkvm/patches-linux-7.1/0020-iommu-tegra-pkvm-diagnose-translated-DMA.patch;
+        }
+        {
+          name = "Tegra pKVM SMMUv2 leaf attributes";
+          patch = ../../modules/reference/hardware/jetpack/nvidia-jetson-orin/pkvm/patches-linux-7.1/0021-KVM-arm64-normalize-Tegra-SMMUv2-leaf-attributes.patch;
+        }
+        {
+          name = "Tegra pKVM SMMUv2 context-bank diagnostics";
+          patch = ../../modules/reference/hardware/jetpack/nvidia-jetson-orin/pkvm/patches-linux-7.1/0022-iommu-tegra-pkvm-diagnose-context-bank-failures.patch;
+        }
+        {
+          name = "Tegra pKVM 32-bit debug DMA aperture";
+          patch = ../../modules/reference/hardware/jetpack/nvidia-jetson-orin/pkvm/patches-linux-7.1/0023-iommu-tegra-pkvm-limit-debug-DMA-IOVAs-to-32-bits.patch;
+        }
+        {
+          name = "Tegra pKVM protected identity DMA";
+          patch = ../../modules/reference/hardware/jetpack/nvidia-jetson-orin/pkvm/patches-linux-7.1/0024-iommu-tegra-pkvm-use-protected-identity-DMA.patch;
+        }
+        {
+          name = "Tegra pKVM host RAM identity snapshot";
+          patch = ../../modules/reference/hardware/jetpack/nvidia-jetson-orin/pkvm/patches-linux-7.1/0025-KVM-arm64-mirror-host-RAM-into-Tegra-identity-domain.patch;
+        }
+        {
+          name = "Tegra pKVM identity translation diagnostics";
+          patch = ../../modules/reference/hardware/jetpack/nvidia-jetson-orin/pkvm/patches-linux-7.1/0026-iommu-tegra-pkvm-diagnose-identity-translations.patch;
         }
         {
           name = "Tegra pKVM protected-device configuration";
@@ -278,26 +380,9 @@ let
           microvm.crosvm.protection.allowDeviceAssignment = true;
         }
       ];
-      ghaf.virtualization.vmConfig.appvms.chromium = {
-        # Keep the browser's declared 6 GiB as its complete allocation. pKVM
-        # does not support Ghaf's balloon lifecycle yet, and the default ratio
-        # would otherwise reserve 18 GiB for this canary.
-        balloonRatio = 0;
-        extraModules = [
-          protectedVmWithoutFirmwareModule
-          {
-            # XDG item exchange is backed by virtio-fs. Removing the protected
-            # guest's host shares also requires disabling its mount declarations.
-            ghaf.xdgitems.enable = lib.mkForce false;
-          }
-        ];
-      };
       microvm.vms = {
         "admin-vm".autostart = lib.mkForce false;
         "net-vm".autostart = lib.mkForce false;
-        "gui-vm".autostart = lib.mkForce false;
-        "chromium-vm".autostart = lib.mkForce false;
-        "flatpak-vm".autostart = lib.mkForce false;
       };
     };
 

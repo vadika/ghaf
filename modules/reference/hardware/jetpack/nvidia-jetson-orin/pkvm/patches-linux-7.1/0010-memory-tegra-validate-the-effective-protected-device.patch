@@ -1,0 +1,48 @@
+From: Vadik Likholetov <vadikas@gmail.com>
+Date: Mon, 17 Aug 2026 15:00:00 +0300
+Subject: [PATCH] memory: tegra: validate the effective protected-device SID
+
+Jetson secure firmware can lock a memory client's stream-ID configuration
+without enabling its override register. In that state the client's hardware
+default SID remains effective, and the override register does not contain a
+meaningful SID.
+
+Determine the effective SID from the security configuration: use the
+override value when overrides are enabled and the client's hardware default
+otherwise. Require that effective SID to match the protected device's
+firmware SID before locking the configuration. This preserves the fail-closed
+behavior for a real mismatch while allowing already-secure default routing.
+
+diff --git a/drivers/memory/tegra/tegra186.c b/drivers/memory/tegra/tegra186.c
+index 5229d88b5..1066eb980 100644
+--- a/drivers/memory/tegra/tegra186.c
++++ b/drivers/memory/tegra/tegra186.c
+@@ -158,17 +158,22 @@ static int tegra186_mc_lock_client_sid(struct tegra_mc *mc,
+ 				       const struct tegra_mc_client *client,
+ 				       unsigned int sid)
+ {
+-	u32 value;
++	u32 effective_sid, value;
+ 
+ 	if (!client->regs.sid.security && !client->regs.sid.override)
+ 		return 0;
+ 
+ 	tegra186_mc_client_sid_override(mc, client, sid);
+-	value = readl(mc->regs + client->regs.sid.override);
+-	if ((value & MC_SID_STREAMID_OVERRIDE_MASK) != sid)
++	value = readl(mc->regs + client->regs.sid.security);
++	if (value & MC_SID_STREAMID_SECURITY_OVERRIDE) {
++		effective_sid = readl(mc->regs + client->regs.sid.override);
++		effective_sid &= MC_SID_STREAMID_OVERRIDE_MASK;
++	} else {
++		effective_sid = client->sid & MC_SID_STREAMID_OVERRIDE_MASK;
++	}
++	if (effective_sid != sid)
+ 		return -EPERM;
+ 
+-	value = readl(mc->regs + client->regs.sid.security);
+ 	value |= MC_SID_STREAMID_SECURITY_WRITE_ACCESS_DISABLED;
+ 	writel(value, mc->regs + client->regs.sid.security);
+ 	value = readl(mc->regs + client->regs.sid.security);
+-- 
+2.51.0

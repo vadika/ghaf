@@ -1,0 +1,93 @@
+From 5678cb9807b6bf5306071bdd84c5ad11c344ba2d Mon Sep 17 00:00:00 2001
+From: vadik likholetov <vadikas@gmail.com>
+Date: Tue, 18 Aug 2026 18:44:18 +0300
+Subject: [PATCH] KVM: arm64: mirror host RAM into Tegra identity domain
+
+---
+ arch/arm64/kvm/hyp/nvhe/iommu/iommu.c      | 27 ++++++++++++++++++----
+ arch/arm64/kvm/hyp/nvhe/iommu/tegra-smmu.c | 11 ++++++++-
+ drivers/iommu/arm-smmu-tegra-pkvm.c        |  2 +-
+ 3 files changed, 34 insertions(+), 6 deletions(-)
+
+diff --git a/arch/arm64/kvm/hyp/nvhe/iommu/iommu.c b/arch/arm64/kvm/hyp/nvhe/iommu/iommu.c
+index 7a66a12af..650c2247a 100644
+--- a/arch/arm64/kvm/hyp/nvhe/iommu/iommu.c
++++ b/arch/arm64/kvm/hyp/nvhe/iommu/iommu.c
+@@ -138,17 +138,36 @@ static int __snapshot_host_stage2(const struct kvm_pgtable_visit_ctx *ctx,
+ 	u64 end = start + kvm_granule_size(level);
+ 	int prot = IOMMU_READ | IOMMU_WRITE;
+ 	struct kvm_iommu_ops *ops = (struct kvm_iommu_ops *)ctx->arg;
++	unsigned int i;
++	int ret;
+ 
+ 	/* Keep unmapped. */
+ 	if (pte && !kvm_pte_valid(pte))
+ 		return 0;
+ 
+-	if (kvm_pte_valid(pte))
++	if (kvm_pte_valid(pte)) {
+ 		prot = pkvm_to_iommu_prot(kvm_pgtable_stage2_pte_prot(pte), start);
+-	else if (!addr_is_memory(start))
+-		prot |= IOMMU_MMIO | IOMMU_NOEXEC;
++		return ops->host_stage2_idmap(start, end, prot);
++	}
++
++	/*
++	 * Empty leaves can span both MMIO holes and RAM.  Classifying the whole
++	 * leaf from its first address can therefore hide RAM from an identity
++	 * IOMMU domain.  Mirror only the portions backed by host memory; MMIO is
++	 * mapped lazily by the host stage-2 fault path when it is actually used.
++	 */
++	for (i = 0; i < hyp_memblock_nr; i++) {
++		u64 mem_start = max(start, hyp_memory[i].base);
++		u64 mem_end = min(end, hyp_memory[i].base + hyp_memory[i].size);
+ 
+-	return ops->host_stage2_idmap(start, end, prot);
++		if (mem_start >= mem_end)
++			continue;
++		ret = ops->host_stage2_idmap(mem_start, mem_end, prot);
++		if (ret)
++			return ret;
++	}
++
++	return 0;
+ }
+ 
+ static int kvm_iommu_snapshot_host_stage2(struct kvm_iommu_ops *ops)
+diff --git a/arch/arm64/kvm/hyp/nvhe/iommu/tegra-smmu.c b/arch/arm64/kvm/hyp/nvhe/iommu/tegra-smmu.c
+index 33d74add6..8faa6b840 100644
+--- a/arch/arm64/kvm/hyp/nvhe/iommu/tegra-smmu.c
++++ b/arch/arm64/kvm/hyp/nvhe/iommu/tegra-smmu.c
+@@ -1047,9 +1047,18 @@ static int tegra_debug_read(pkvm_handle_t iommu_id, u32 selector,
+ 			return -ENOENT;
+ 		cb = tegra_smmu_cb(smmu, 1, domain->cb);
+ 		*value0 = readl_relaxed(tegra_smmu_page(smmu, 1, 0) +
+-				       PKVM_SMMU_GR0_SCR0);
++					       PKVM_SMMU_GR0_SCR0);
+ 		*value1 = readl_relaxed(cb + PKVM_SMMU_CB_SCTLR);
+ 		return 0;
++	case 10:
++		return tegra_debug_leaf(0x0000000080000000ULL,
++					value0, value1);
++	case 11:
++		return tegra_debug_leaf(0x0000000100000000ULL,
++					value0, value1);
++	case 12:
++		return tegra_debug_leaf(0x0000000370000000ULL,
++					value0, value1);
+ 	default:
+ 		return -EINVAL;
+ 	}
+diff --git a/drivers/iommu/arm-smmu-tegra-pkvm.c b/drivers/iommu/arm-smmu-tegra-pkvm.c
+index 5e1f06a93..6cc633f3f 100644
+--- a/drivers/iommu/arm-smmu-tegra-pkvm.c
++++ b/drivers/iommu/arm-smmu-tegra-pkvm.c
+@@ -651,7 +651,7 @@ static int pkvm_tegra_init_driver(void)
+ 	if (ret)
+ 		return ret;
+ 	for (size_t iommu = 0; iommu < pkvm_tegra_smmu_count; iommu++) {
+-		for (u32 selector = 0; selector < 10; selector++) {
++		for (u32 selector = 0; selector < 13; selector++) {
+ 			u64 value0 = 0, value1 = 0;
+ 
+ 			ret = kvm_iommu_debug_read(pkvm_tegra_hyp_driver, iommu,

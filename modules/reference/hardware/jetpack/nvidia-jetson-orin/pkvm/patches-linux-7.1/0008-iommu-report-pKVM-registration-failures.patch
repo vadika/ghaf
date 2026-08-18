@@ -1,0 +1,58 @@
+diff --git a/drivers/iommu/arm-smmu-tegra-pkvm.c b/drivers/iommu/arm-smmu-tegra-pkvm.c
+--- a/drivers/iommu/arm-smmu-tegra-pkvm.c
++++ b/drivers/iommu/arm-smmu-tegra-pkvm.c
+@@ -179,8 +179,12 @@ static int pkvm_tegra_attach(struct iommu_domain *domain, struct device *dev,
+ 			ret = kvm_iommu_set_identity(pkvm_tegra_hyp_driver,
+ 						     master->smmu->id,
+ 						     fwspec->ids[i], true, 0);
+-			if (ret)
++			if (ret) {
++				dev_err(dev,
++					"failed to attach identity domain to SMMU %llu SID %#x: %d\n",
++					master->smmu->id, fwspec->ids[i], ret);
+ 				goto err_detach;
++			}
+ 		}
+ 		return 0;
+ 	}
+@@ -431,11 +435,17 @@ static int pkvm_tegra_register_iommu(struct device *dev, void *data)
+ 
+ 	ret = iommu_device_sysfs_add(&smmu->iommu, dev, NULL,
+ 				     "pkvm-tegra-smmu.%u", smmu->id);
+-	if (ret)
++	if (ret) {
++		dev_err(dev, "failed to add pKVM IOMMU %llu to sysfs: %d\n",
++			smmu->id, ret);
+ 		return ret;
++	}
+ 	ret = iommu_device_register(&smmu->iommu, &pkvm_tegra_iommu_ops, dev);
+-	if (ret)
++	if (ret) {
++		dev_err(dev, "failed to register pKVM IOMMU %llu: %d\n",
++			smmu->id, ret);
+ 		iommu_device_sysfs_remove(&smmu->iommu);
++	}
+ 	return ret;
+ }
+ 
+diff --git a/drivers/iommu/iommu.c b/drivers/iommu/iommu.c
+--- a/drivers/iommu/iommu.c
++++ b/drivers/iommu/iommu.c
+@@ -1807,6 +1807,8 @@ static int probe_iommu_group(struct device *dev, void *data)
+ 	mutex_lock(&iommu_probe_device_lock);
+ 	ret = __iommu_probe_device(dev, group_list);
+ 	mutex_unlock(&iommu_probe_device_lock);
++	if (ret && ret != -ENODEV)
++		dev_err(dev, "IOMMU probe failed: %d\n", ret);
+ 	if (ret == -ENODEV)
+ 		ret = 0;
+ 
+@@ -1977,6 +1979,8 @@ static int bus_iommu_probe(const struct bus_type *bus)
+ 		 */
+ 		ret = iommu_setup_default_domain(group, 0);
+ 		if (ret) {
++			dev_err(iommu_group_first_dev(group),
++				"IOMMU default domain setup failed: %d\n", ret);
+ 			mutex_unlock(&group->mutex);
+ 			return ret;
+ 		}

@@ -1,0 +1,116 @@
+From: Vadik Likholetov <vadikas@gmail.com>
+Date: Mon, 17 Aug 2026 18:00:00 +0300
+Subject: [PATCH] KVM: arm64: use the SMMUv2 concatenated root layout
+
+Arm SMMUv2 requires a concatenated level-1 stage-2 root when 4K tables
+target a 40- or 42-bit output address space. Reusing KVM's CPU-selected
+level-0 layout makes the SMMU walk a different table shape and turns host
+DMA into poisoned transactions.
+
+Select the mandatory SMMUv2 start level, support the resulting contiguous
+root allocation in both identity and assigned domains, and publish every
+page of a concatenated non-coherent root.
+
+diff --git a/include/kvm/tegra-smmu-pkvm.h b/include/kvm/tegra-smmu-pkvm.h
+index fbd9a677d..d7e219f43 100644
+--- a/include/kvm/tegra-smmu-pkvm.h
++++ b/include/kvm/tegra-smmu-pkvm.h
+@@ -94,6 +94,7 @@ struct pkvm_tegra_smmu_device {
+ #define PKVM_SMMU_CB_TCR		0x030
+ #define PKVM_SMMU_VTCR_RES1		BIT(31)
+ #define PKVM_SMMU_VTCR_PS		GENMASK(18, 16)
++#define PKVM_SMMU_VTCR_SL0		GENMASK(7, 6)
+ #define PKVM_SMMU_CB_FSR		0x058
+ #define PKVM_SMMU_CB_TLBIIPAS2		0x630
+ #define PKVM_SMMU_CB_TLBIIPAS2L	0x638
+diff --git a/arch/arm64/kvm/hyp/nvhe/iommu/tegra-smmu.c b/arch/arm64/kvm/hyp/nvhe/iommu/tegra-smmu.c
+index 3234ed55f..c54d3226f 100644
+--- a/arch/arm64/kvm/hyp/nvhe/iommu/tegra-smmu.c
++++ b/arch/arm64/kvm/hyp/nvhe/iommu/tegra-smmu.c
+@@ -196,15 +196,23 @@ static void *tegra_atomic_zalloc_page(void *arg)
+ 
+ static void *tegra_atomic_zalloc_pages_exact(size_t size)
+ {
+-	if (size != PAGE_SIZE)
++	void *addr;
++
++	if (size != (PAGE_SIZE << get_order(size)))
+ 		return NULL;
+-	return kvm_iommu_donate_pages_atomic(0);
++	addr = kvm_iommu_donate_pages_atomic(get_order(size));
++	if (addr)
++		hyp_split_page(hyp_virt_to_page(addr));
++	return addr;
+ }
+ 
+ static void tegra_atomic_free_pages_exact(void *addr, size_t size)
+ {
+-	WARN_ON(size != PAGE_SIZE);
+-	kvm_iommu_reclaim_pages_atomic(addr);
++	while (size) {
++		kvm_iommu_reclaim_pages_atomic(addr);
++		addr += PAGE_SIZE;
++		size -= PAGE_SIZE;
++	}
+ }
+ 
+ static int tegra_page_count(void *addr)
+@@ -225,15 +233,23 @@ static void *tegra_domain_zalloc_page(void *arg)
+ 
+ static void *tegra_domain_zalloc_pages_exact(size_t size)
+ {
+-	if (size != PAGE_SIZE)
++	void *addr;
++
++	if (size != (PAGE_SIZE << get_order(size)))
+ 		return NULL;
+-	return kvm_iommu_donate_page();
++	addr = kvm_iommu_donate_pages(get_order(size), 0);
++	if (addr)
++		hyp_split_page(hyp_virt_to_page(addr));
++	return addr;
+ }
+ 
+ static void tegra_domain_free_pages_exact(void *addr, size_t size)
+ {
+-	WARN_ON(size != PAGE_SIZE);
+-	kvm_iommu_reclaim_page(addr);
++	while (size) {
++		kvm_iommu_reclaim_page(addr);
++		addr += PAGE_SIZE;
++		size -= PAGE_SIZE;
++	}
+ }
+ 
+ static void tegra_domain_free_unlinked(void *addr, s8 level)
+@@ -293,6 +309,18 @@ static u64 tegra_vtcr(unsigned int address_bits)
+ 
+ 	vtcr &= ~PKVM_SMMU_VTCR_PS;
+ 	vtcr |= FIELD_PREP(PKVM_SMMU_VTCR_PS, tegra_ps(address_bits));
++	/*
++	 * Arm SMMUv2 requires a concatenated level-1 root for a 40- or
++	 * 42-bit output address size with 4K tables. KVM otherwise selects a
++	 * level-0 root from the input size alone. Select level 1 here; KVM's
++	 * page-table allocator will then provide the required two or eight
++	 * contiguous root pages.
++	 */
++	if ((address_bits == 40 || address_bits == 42) &&
++	    FIELD_GET(PKVM_SMMU_VTCR_SL0, vtcr) == 2) {
++		vtcr &= ~PKVM_SMMU_VTCR_SL0;
++		vtcr |= FIELD_PREP(PKVM_SMMU_VTCR_SL0, 1);
++	}
+ 	return vtcr;
+ }
+ 
+@@ -348,7 +376,8 @@ static void tegra_sync_pgtable(struct pkvm_tegra_hyp_domain *domain,
+ 	WARN_ON(kvm_pgtable_walk(&domain->pgt, start, size, &walker));
+ 	/* The root table has no parent entry for the post-order walker. */
+ 	dcache_clean_inval_poc((unsigned long)domain->pgt.pgd,
+-			       (unsigned long)domain->pgt.pgd + PAGE_SIZE);
++			       (unsigned long)domain->pgt.pgd +
++			       kvm_pgtable_stage2_pgd_size(domain->mmu.vtcr));
+ 	dsb(sy);
+ }
+ 
+-- 
+2.51.0

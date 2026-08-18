@@ -1,0 +1,49 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Vadim Kochan <vadim4j@gmail.com>
+Date: Tue, 18 Aug 2026 06:20:00 +0300
+Subject: [PATCH] KVM: arm64: initialize EL2 heap during pKVM setup
+
+The Android pKVM device-assignment implementation adds a dynamically
+refillable EL2 heap and uses it for IOMMU domain-private data.  The 7.1
+port included the allocator implementation but omitted the donor's setup
+call, leaving its list head and lock zero-initialized.
+
+A translated host DMA domain reaches hyp_alloc() while the pKVM IOMMU
+driver is initialized.  It then treats the zero list head as a populated
+list and dereferences address zero, causing an nVHE panic.
+
+Initialize the 128 MiB private virtual-address range during __pkvm_init(),
+matching the Android 6.18 donor.  This runs after the final hyp mappings are
+created and before host IOMMU drivers can allocate EL2 domains.
+
+Signed-off-by: Vadim Kochan <vadim4j@gmail.com>
+---
+ arch/arm64/kvm/hyp/nvhe/setup.c | 5 +++++
+ 1 file changed, 5 insertions(+)
+
+diff --git a/arch/arm64/kvm/hyp/nvhe/setup.c b/arch/arm64/kvm/hyp/nvhe/setup.c
+index 9e4be27b8..5444334f9 100644
+--- a/arch/arm64/kvm/hyp/nvhe/setup.c
++++ b/arch/arm64/kvm/hyp/nvhe/setup.c
+@@ -10,6 +10,7 @@
+ #include <asm/kvm_pgtable.h>
+ #include <asm/kvm_pkvm.h>
+ 
++#include <nvhe/alloc.h>
+ #include <nvhe/early_alloc.h>
+ #include <nvhe/ffa.h>
+ #include <nvhe/gfp.h>
+@@ -382,6 +383,10 @@ int __pkvm_init(phys_addr_t phys, unsigned long size, unsigned long *per_cpu_bas
+ 	if (ret)
+ 		return ret;
+ 
++	ret = hyp_alloc_init(SZ_128M);
++	if (ret)
++		return ret;
++
+ 	update_nvhe_init_params();
+ 
+ 	/* Jump in the idmap page to switch to the new page-tables */
+-- 
+2.51.0
+

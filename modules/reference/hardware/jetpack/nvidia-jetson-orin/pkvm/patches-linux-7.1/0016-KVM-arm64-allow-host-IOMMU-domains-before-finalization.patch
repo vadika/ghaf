@@ -1,0 +1,78 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Vadim Kochan <vadim4j@gmail.com>
+Date: Tue, 18 Aug 2026 05:25:00 +0300
+Subject: [PATCH] KVM: arm64: allow host IOMMU domains before finalization
+
+The pKVM finalization path initializes host IOMMU drivers before it drops
+host privileges.  A translated default domain therefore needs to allocate
+its EL2 domain and page tables, attach the device, and establish any direct
+mappings before pKVM has finalized.
+
+These host IOMMU lifecycle hypercalls and the allocator-management calls
+that refill their EL2 page pool are currently in the post-finalization-only
+range.  EL2 rejects them during IOMMU driver initialization with
+SMCCC_RET_NOT_SUPPORTED.  Identity domains hide this because their routing
+hypercall is already always available, but translated DMA domains cannot be
+created.
+
+Move the host domain lifecycle and allocator-management calls into the
+always-available range.  Keep nested-domain and guest-facing operations
+post-finalization-only.
+
+Signed-off-by: Vadim Kochan <vadim4j@gmail.com>
+---
+ arch/arm64/include/asm/kvm_asm.h | 22 +++++++++++-----------
+ 1 file changed, 11 insertions(+), 11 deletions(-)
+
+diff --git a/arch/arm64/include/asm/kvm_asm.h b/arch/arm64/include/asm/kvm_asm.h
+index 04f8311aa..f83d688a7 100644
+--- a/arch/arm64/include/asm/kvm_asm.h
++++ b/arch/arm64/include/asm/kvm_asm.h
+@@ -95,6 +95,17 @@ enum __kvm_host_smccc_func {
+ 	__KVM_HOST_SMCCC_FUNC___pkvm_iommu_debug_read,
+ 	__KVM_HOST_SMCCC_FUNC___pkvm_devices_init,
+ 	__KVM_HOST_SMCCC_FUNC___pkvm_host_iommu_set_identity,
++	__KVM_HOST_SMCCC_FUNC___pkvm_host_iommu_alloc_domain,
++	__KVM_HOST_SMCCC_FUNC___pkvm_host_iommu_free_domain,
++	__KVM_HOST_SMCCC_FUNC___pkvm_host_iommu_attach_dev,
++	__KVM_HOST_SMCCC_FUNC___pkvm_host_iommu_detach_dev,
++	__KVM_HOST_SMCCC_FUNC___pkvm_host_iommu_map_pages,
++	__KVM_HOST_SMCCC_FUNC___pkvm_host_iommu_unmap_pages,
++	__KVM_HOST_SMCCC_FUNC___pkvm_host_iommu_iova_to_phys,
++	__KVM_HOST_SMCCC_FUNC___pkvm_host_iommu_map_sg,
++	__KVM_HOST_SMCCC_FUNC___pkvm_hyp_alloc_mgt_refill,
++	__KVM_HOST_SMCCC_FUNC___pkvm_hyp_alloc_mgt_reclaimable,
++	__KVM_HOST_SMCCC_FUNC___pkvm_hyp_alloc_mgt_reclaim,
+ 
+ 	MARKER(__KVM_HOST_SMCCC_FUNC_PKVM_ONLY),
+ 
+@@ -120,15 +131,7 @@ enum __kvm_host_smccc_func {
+ 	__KVM_HOST_SMCCC_FUNC___pkvm_vcpu_load,
+ 	__KVM_HOST_SMCCC_FUNC___pkvm_vcpu_put,
+ 	__KVM_HOST_SMCCC_FUNC___pkvm_tlb_flush_vmid,
+-	__KVM_HOST_SMCCC_FUNC___pkvm_host_iommu_alloc_domain,
+-	__KVM_HOST_SMCCC_FUNC___pkvm_host_iommu_free_domain,
+-	__KVM_HOST_SMCCC_FUNC___pkvm_host_iommu_attach_dev,
+ 	__KVM_HOST_SMCCC_FUNC___pkvm_host_iommu_attach_dev_nested,
+-	__KVM_HOST_SMCCC_FUNC___pkvm_host_iommu_detach_dev,
+-	__KVM_HOST_SMCCC_FUNC___pkvm_host_iommu_map_pages,
+-	__KVM_HOST_SMCCC_FUNC___pkvm_host_iommu_unmap_pages,
+-	__KVM_HOST_SMCCC_FUNC___pkvm_host_iommu_iova_to_phys,
+-	__KVM_HOST_SMCCC_FUNC___pkvm_host_iommu_map_sg,
+ 	__KVM_HOST_SMCCC_FUNC___pkvm_host_iommu_iotlb_inv_nested_domain,
+ 	__KVM_HOST_SMCCC_FUNC___pkvm_host_iommu_nested_cfg_sync,
+ 	__KVM_HOST_SMCCC_FUNC___pkvm_host_iommu_page_response,
+@@ -138,10 +141,6 @@ enum __kvm_host_smccc_func {
+ 	__KVM_HOST_SMCCC_FUNC___pkvm_host_map_guest_mmio,
+ 	__KVM_HOST_SMCCC_FUNC___pkvm_pviommu_attach,
+ 	__KVM_HOST_SMCCC_FUNC___pkvm_pviommu_add_vsid,
+-	__KVM_HOST_SMCCC_FUNC___pkvm_hyp_alloc_mgt_refill,
+-	__KVM_HOST_SMCCC_FUNC___pkvm_hyp_alloc_mgt_reclaimable,
+-	__KVM_HOST_SMCCC_FUNC___pkvm_hyp_alloc_mgt_reclaim,
+-
+ 	MARKER(__KVM_HOST_SMCCC_FUNC_MAX)
+ };
+ 
+-- 
+2.51.0
+

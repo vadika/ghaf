@@ -1,0 +1,39 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Vadim Kochan <vadim4j@gmail.com>
+Date: Tue, 18 Aug 2026 04:05:00 +0300
+Subject: [PATCH] iommu: tegra-pkvm: use translated DMA domains by default
+
+Do not force every Tegra device into an identity IOMMU domain.  Devices
+whose DMA mask is smaller than physical memory need an IOVA aperture so
+the DMA API can map high pages into an address the device can reach.
+
+In particular, SDMMC uses a 34-bit DMA aperture on AGX Orin.  With an
+identity domain, allocations above 16 GiB fail DMA mapping and the SDHCI
+controller receives the masked DMA_MAPPING_ERROR value 0x3ffffff00,
+which falls in VPR and prevents the eMMC from being read.
+
+Return no device-specific override and let the IOMMU core select its
+normal translated DMA domain.  The Tegra pKVM frontend already implements
+paging-domain allocation, mapping, unmapping, and attachment.
+
+Signed-off-by: Vadim Kochan <vadim4j@gmail.com>
+---
+ drivers/iommu/arm-smmu-tegra-pkvm.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/drivers/iommu/arm-smmu-tegra-pkvm.c b/drivers/iommu/arm-smmu-tegra-pkvm.c
+index 41fa98341045..8088b3a32324 100644
+--- a/drivers/iommu/arm-smmu-tegra-pkvm.c
++++ b/drivers/iommu/arm-smmu-tegra-pkvm.c
+@@ -314,7 +314,7 @@ static struct iommu_domain *pkvm_tegra_domain_alloc_paging(struct device *dev)
+ 
+ static int pkvm_tegra_default_domain(struct device *dev)
+ {
+-	return IOMMU_DOMAIN_IDENTITY;
++	return 0;
+ }
+ 
+ static const struct iommu_ops pkvm_tegra_iommu_ops = {
+-- 
+2.51.0
+

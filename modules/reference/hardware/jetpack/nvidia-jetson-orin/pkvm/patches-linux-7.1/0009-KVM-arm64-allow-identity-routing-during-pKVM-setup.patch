@@ -1,0 +1,57 @@
+From: Vadik Likholetov <vadikas@gmail.com>
+Date: Mon, 17 Aug 2026 12:00:00 +0300
+Subject: [PATCH] KVM: arm64: allow identity routing during pKVM setup
+
+An IOMMU backend can register its Linux iommu_device instances while pKVM is
+still finalizing. Registering an instance probes its firmware-described
+devices and attaches their default identity domains. That path calls
+__pkvm_host_iommu_set_identity before the protected-mode static key is
+enabled.
+
+Keep the identity-routing hypercall in the always-available range so setup
+can establish safe host DMA routes before the host loses privilege. The EL2
+implementation still checks the protected-device context, so its
+post-finalization authorization is unchanged.
+
+diff --git a/arch/arm64/include/asm/kvm_asm.h b/arch/arm64/include/asm/kvm_asm.h
+index 74d703e01..82ebf197b 100644
+--- a/arch/arm64/include/asm/kvm_asm.h
++++ b/arch/arm64/include/asm/kvm_asm.h
+@@ -93,6 +93,7 @@ enum __kvm_host_smccc_func {
+ 	__KVM_HOST_SMCCC_FUNC___vgic_v5_restore_vmcr_apr,
+ 	__KVM_HOST_SMCCC_FUNC___pkvm_iommu_register_ops,
+ 	__KVM_HOST_SMCCC_FUNC___pkvm_devices_init,
++	__KVM_HOST_SMCCC_FUNC___pkvm_host_iommu_set_identity,
+ 
+ 	MARKER(__KVM_HOST_SMCCC_FUNC_PKVM_ONLY),
+ 
+@@ -126,7 +127,6 @@ enum __kvm_host_smccc_func {
+ 	__KVM_HOST_SMCCC_FUNC___pkvm_host_iommu_map_pages,
+ 	__KVM_HOST_SMCCC_FUNC___pkvm_host_iommu_unmap_pages,
+ 	__KVM_HOST_SMCCC_FUNC___pkvm_host_iommu_iova_to_phys,
+-	__KVM_HOST_SMCCC_FUNC___pkvm_host_iommu_set_identity,
+ 	__KVM_HOST_SMCCC_FUNC___pkvm_host_iommu_map_sg,
+ 	__KVM_HOST_SMCCC_FUNC___pkvm_host_iommu_iotlb_inv_nested_domain,
+ 	__KVM_HOST_SMCCC_FUNC___pkvm_host_iommu_nested_cfg_sync,
+diff --git a/arch/arm64/kvm/hyp/nvhe/hyp-main.c b/arch/arm64/kvm/hyp/nvhe/hyp-main.c
+index ec60cbe80..48549b636 100644
+--- a/arch/arm64/kvm/hyp/nvhe/hyp-main.c
++++ b/arch/arm64/kvm/hyp/nvhe/hyp-main.c
+@@ -1042,6 +1042,7 @@ static const hcall_t host_hcall[] = {
+ 	HANDLE_FUNC(__vgic_v5_restore_vmcr_apr),
+ 	HANDLE_FUNC(__pkvm_iommu_register_ops),
+ 	HANDLE_FUNC(__pkvm_devices_init),
++	HANDLE_FUNC(__pkvm_host_iommu_set_identity),
+ 
+ 	HANDLE_FUNC(__pkvm_host_share_hyp),
+ 	HANDLE_FUNC(__pkvm_host_unshare_hyp),
+@@ -1072,7 +1073,6 @@ static const hcall_t host_hcall[] = {
+ 	HANDLE_FUNC(__pkvm_host_iommu_map_pages),
+ 	HANDLE_FUNC(__pkvm_host_iommu_unmap_pages),
+ 	HANDLE_FUNC(__pkvm_host_iommu_iova_to_phys),
+-	HANDLE_FUNC(__pkvm_host_iommu_set_identity),
+ 	HANDLE_FUNC(__pkvm_host_iommu_map_sg),
+ 	HANDLE_FUNC(__pkvm_host_iommu_iotlb_inv_nested_domain),
+ 	HANDLE_FUNC(__pkvm_host_iommu_nested_cfg_sync),
+-- 
+2.51.0

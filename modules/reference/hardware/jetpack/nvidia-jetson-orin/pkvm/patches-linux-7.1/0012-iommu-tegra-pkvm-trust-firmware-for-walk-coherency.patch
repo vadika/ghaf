@@ -1,0 +1,38 @@
+From: Vadik Likholetov <vadikas@gmail.com>
+Date: Mon, 17 Aug 2026 23:59:00 +0300
+Subject: [PATCH] iommu: tegra-pkvm: trust firmware for walk coherency
+
+The generic Arm SMMU driver treats firmware as authoritative for page-table
+walk coherency even when IDR0.CTTW claims otherwise, since implementations
+can expose an incorrectly configured ID bit.
+
+Apply the same policy to the Tegra pKVM frontend. Tegra234 does not mark
+these SMMU nodes dma-coherent, so the hypervisor must clean page-table
+updates to PoC before the SMMU walks them. Skipping those cleans makes the
+SMMU consume stale descriptors and corrupts host DMA.
+
+---
+ drivers/iommu/arm-smmu-tegra-pkvm.c | 10 ++++++++--
+ 1 file changed, 8 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/iommu/arm-smmu-tegra-pkvm.c b/drivers/iommu/arm-smmu-tegra-pkvm.c
+--- a/drivers/iommu/arm-smmu-tegra-pkvm.c
++++ b/drivers/iommu/arm-smmu-tegra-pkvm.c
+@@ -391,7 +391,13 @@ static int pkvm_tegra_probe(struct platform_device *pdev)
+ 	hyp_smmu->ias = pkvm_tegra_id_size(FIELD_GET(PKVM_SMMU_ID2_IAS, id2));
+ 	hyp_smmu->oas = pkvm_tegra_id_size(FIELD_GET(PKVM_SMMU_ID2_OAS, id2));
+-	hyp_smmu->coherent_walk = of_dma_is_coherent(dev->of_node) ||
+-				  !!(id0 & PKVM_SMMU_ID0_CTTW);
++	/*
++	 * Match the Arm SMMU driver's coherency policy: firmware is the
++	 * authority even when IDR0.CTTW advertises coherent table walks. This
++	 * also covers implementations whose ID register is configured
++	 * incorrectly. Tegra234 does not mark these SMMUs dma-coherent, so the
++	 * hypervisor must publish page-table updates explicitly.
++	 */
++	hyp_smmu->coherent_walk = of_dma_is_coherent(dev->of_node);
+ 	hyp_smmu->vmid16 = !!(id2 & PKVM_SMMU_ID2_VMID16);
+ 	if ((hyp_smmu->pgshift != 12 && hyp_smmu->pgshift != 16) ||
+ 	    hyp_smmu->mmio_size <
+-- 
+2.50.1

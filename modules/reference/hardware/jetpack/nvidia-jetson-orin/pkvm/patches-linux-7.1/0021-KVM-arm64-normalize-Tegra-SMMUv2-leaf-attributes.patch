@@ -1,0 +1,51 @@
+From 12fe1d28902f230013d9b2c6ffc17a6bc37752c0 Mon Sep 17 00:00:00 2001
+From: vadik likholetov <vadikas@gmail.com>
+Date: Tue, 18 Aug 2026 13:33:47 +0300
+Subject: [PATCH] KVM: arm64: normalize Tegra SMMUv2 leaf attributes
+
+KVM stage-2 page tables use the CPU FEAT_XNX encoding and always select inner-shareable mappings. Arm SMMUv2 LPAE tables instead require both XN bits for no-execute leaves and use outer-shareable attributes for device and non-cacheable mappings.\n\nNormalize freshly-created leaves before cleaning the non-coherent page tables so the Tegra SMMU consumes the same descriptor attributes as io-pgtable-arm.
+---
+ arch/arm64/kvm/hyp/nvhe/iommu/tegra-smmu.c | 25 ++++++++++++++++++++++
+ 1 file changed, 25 insertions(+)
+
+diff --git a/arch/arm64/kvm/hyp/nvhe/iommu/tegra-smmu.c b/arch/arm64/kvm/hyp/nvhe/iommu/tegra-smmu.c
+index b75f4e05e..5f82ee734 100644
+--- a/arch/arm64/kvm/hyp/nvhe/iommu/tegra-smmu.c
++++ b/arch/arm64/kvm/hyp/nvhe/iommu/tegra-smmu.c
+@@ -363,8 +363,33 @@ static u32 tegra_domain_vtcr(struct pkvm_tegra_hyp_domain *domain)
+ static int tegra_sync_pte(const struct kvm_pgtable_visit_ctx *ctx,
+ 			  enum kvm_pgtable_walk_flags visit)
+ {
++	kvm_pte_t pte;
+ 	void *child;
+ 
++	if (visit == KVM_PGTABLE_WALK_LEAF) {
++		pte = READ_ONCE(*ctx->ptep);
++		if (!kvm_pte_valid(pte))
++			return 0;
++
++		/*
++		 * KVM's CPU stage-2 helper uses the FEAT_XNX encoding for XN,
++		 * while an Arm SMMUv2 LPAE stage-2 leaf uses both XN bits.
++		 * io-pgtable-arm also uses outer-shareable attributes for device
++		 * and normal non-cacheable mappings, rather than KVM's fixed
++		 * inner-shareable attribute.  Normalize the freshly-created leaf
++		 * before publishing it to the non-coherent SMMU table walker.
++		 */
++		pte &= ~KVM_PTE_LEAF_ATTR_HI_S2_XN;
++		pte |= FIELD_PREP(KVM_PTE_LEAF_ATTR_HI_S2_XN, 3);
++		if ((pte & KVM_PTE_LEAF_ATTR_LO_S2_MEMATTR) !=
++		    PAGE_S2_MEMATTR(NORMAL)) {
++			pte &= ~KVM_PTE_LEAF_ATTR_LO_S2_SH;
++			pte |= FIELD_PREP(KVM_PTE_LEAF_ATTR_LO_S2_SH, 2);
++		}
++		WRITE_ONCE(*ctx->ptep, pte);
++		return 0;
++	}
++
+ 	if (visit != KVM_PGTABLE_WALK_TABLE_POST)
+ 		return 0;
+ 
+-- 
+2.55.0
+
