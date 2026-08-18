@@ -1,0 +1,39 @@
+From 7ecc5322596e93ad13c627db80c62ff961f01b38 Mon Sep 17 00:00:00 2001
+From: vadik likholetov <vadikas@gmail.com>
+Date: Tue, 18 Aug 2026 21:13:12 +0300
+Subject: [PATCH] iommu: tegra-pkvm: allow unmatched host streams during
+ bring-up
+
+Honor the debug target's arm-smmu.disable_bypass=0 policy when EL2
+takes ownership of the Tegra SMMUs. Keep matched stream IDs translated,
+but retain firmware bypass for early host masters without an SMR while
+the protected stream inventory is incomplete.
+
+Signed-off-by: vadik likholetov <vadikas@gmail.com>
+
+diff --git a/arch/arm64/kvm/hyp/nvhe/iommu/tegra-smmu.c b/arch/arm64/kvm/hyp/nvhe/iommu/tegra-smmu.c
+index e8df6ed30..1e80179bb 100644
+--- a/arch/arm64/kvm/hyp/nvhe/iommu/tegra-smmu.c
++++ b/arch/arm64/kvm/hyp/nvhe/iommu/tegra-smmu.c
+@@ -547,10 +547,14 @@ static int tegra_reset_smmu(struct pkvm_tegra_hyp_smmu *smmu)
+ 	scr0 &= ~(PKVM_SMMU_SCR0_CLIENTPD);
+ 	scr0 &= ~(PKVM_SMMU_SCR0_BSU | PKVM_SMMU_SCR0_FB |
+ 		   PKVM_SMMU_SCR0_GCFGFIE | PKVM_SMMU_SCR0_GFIE |
+-		   PKVM_SMMU_SCR0_VMID16EN);
++		   PKVM_SMMU_SCR0_USFCFG | PKVM_SMMU_SCR0_VMID16EN);
++	/*
++	 * Preserve arm-smmu.disable_bypass=0 semantics during host DMA
++	 * bring-up. Matched streams still use their translated context, while
++	 * masters not yet represented by an SMR retain the firmware bypass path.
++	 */
+ 	scr0 |= PKVM_SMMU_SCR0_PTM | PKVM_SMMU_SCR0_VMIDPNE |
+-		 PKVM_SMMU_SCR0_USFCFG | PKVM_SMMU_SCR0_GCFGFRE |
+-		 PKVM_SMMU_SCR0_GFRE;
++		 PKVM_SMMU_SCR0_GCFGFRE | PKVM_SMMU_SCR0_GFRE;
+ 	if (smmu->params->vmid16)
+ 		scr0 |= PKVM_SMMU_SCR0_VMID16EN;
+ 	tegra_smmu_write(smmu, 0, PKVM_SMMU_GR0_SCR0, scr0);
+-- 
+2.55.0
+
+

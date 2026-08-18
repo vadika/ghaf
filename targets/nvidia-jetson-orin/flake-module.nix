@@ -306,6 +306,10 @@ let
           patch = ../../modules/reference/hardware/jetpack/nvidia-jetson-orin/pkvm/patches-linux-7.1/0026-iommu-tegra-pkvm-diagnose-identity-translations.patch;
         }
         {
+          name = "Tegra pKVM unmatched host stream bypass";
+          patch = ../../modules/reference/hardware/jetpack/nvidia-jetson-orin/pkvm/patches-linux-7.1/0027-iommu-tegra-pkvm-allow-unmatched-host-streams-during-bring-up.patch;
+        }
+        {
           name = "Tegra pKVM protected-device configuration";
           patch = null;
           structuredExtraConfig = with lib.kernel; {
