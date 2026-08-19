@@ -209,14 +209,18 @@ let
         "dce-iso-anchor"
       ];
 
-      # Keep host-IOMMU debug iterations small. The combined GUI VM and the
-      # Chromium and Flatpak AppVMs do not participate in host eMMC/SMMU
-      # bring-up, and carrying their closures makes every destructive flash
-      # substantially larger. This is intentionally confined to the pKVM debug
-      # target; the accelerated GUI target remains the full-topology rollback.
+      # Keep host-IOMMU debug iterations small. GUIVM and FlatpakVM do not
+      # participate in this service-plane checkpoint, and carrying their
+      # closures makes every destructive flash substantially larger. ChromiumVM
+      # is the one protected application endpoint included after AdminVM,
+      # NetVM, virtual networking, and GIVC passed together. This remains
+      # confined to the pKVM debug target; the accelerated GUI target is the
+      # full-topology rollback.
       ghaf.hardware.nvidia.passthroughs.gui_vm.enable = lib.mkForce false;
       ghaf.virtualization.microvm.guivm.enable = lib.mkForce false;
-      ghaf.reference.appvms.chromium.enable = lib.mkForce false;
+      ghaf.virtualization.microvm.appvm.enable = lib.mkForce true;
+      ghaf.reference.appvms.enable = lib.mkForce true;
+      ghaf.reference.appvms.chromium.enable = lib.mkForce true;
       ghaf.reference.appvms.flatpak.enable = lib.mkForce false;
 
       # Apply the Android 17 / Linux 6.18 protected-device implementation and
@@ -403,9 +407,8 @@ let
       ];
 
       # Ghaf's boot-order module starts every configured VM regardless of the
-      # microvm.nix autostart setting. Disable it for this staged canary and
-      # force every VM in this fixed target topology to remain stopped. Each
-      # protected-VM gate is started manually after the host passes its checks.
+      # microvm.nix autostart setting. Disable it so the reduced target can use
+      # explicit weak ordering between its three protected VMs.
       ghaf.microvm-boot.enable = lib.mkForce false;
       # balloon-manager is normally pulled into microvms.target and requires
       # each ballooned AppVM's memory manager, which in turn requires the VM.
@@ -417,8 +420,7 @@ let
       # EROFS store-disk path for every guest in this debug target.
       ghaf.virtualization.microvm.storeOnDisk.enable = true;
 
-      # AdminVM is the first device-free protected guest. Keep it manually
-      # started while later protected guests are added to this same target.
+      # AdminVM is the device-free GIVC control-plane guest.
       ghaf.virtualization.vmConfig.sysvms.adminvm.extraModules = [
         protectedVmWithoutFirmwareModule
       ];
@@ -430,6 +432,20 @@ let
           microvm.crosvm.protection.allowDeviceAssignment = true;
         }
       ];
+      ghaf.virtualization.vmConfig.appvms.chromium = {
+        # Keep ChromiumVM's declared 6 GiB as its complete allocation. pKVM
+        # does not support Ghaf's balloon lifecycle yet, and the default ratio
+        # would otherwise reserve 18 GiB.
+        balloonRatio = 0;
+        extraModules = [
+          protectedVmWithoutFirmwareModule
+          {
+            # XDG item exchange uses virtio-fs. A protected guest must not use
+            # that host-visible vhost-user memory backend.
+            ghaf.xdgitems.enable = lib.mkForce false;
+          }
+        ];
+      };
 
       # EL2 must reset MGBE0 before assigning it to a protected guest and
       # again while reclaiming it. Keep the BPMP clock votes alive across the
@@ -461,14 +477,28 @@ let
           "pkvm-mgbe0-clocks.service"
         ];
       };
+      systemd.services."microvm@chromium-vm" = {
+        # ChromiumVM consumes both the routed network and the GIVC control
+        # plane. Keep these dependencies weak so a failed service-plane VM is
+        # visible as a degraded boot rather than suppressing the app canary.
+        wants = [
+          "microvm@admin-vm.service"
+          "microvm@net-vm.service"
+        ];
+        after = [
+          "microvm@admin-vm.service"
+          "microvm@net-vm.service"
+        ];
+      };
 
-      # MGBE0 assignment, protected teardown, the TAP network, AF_VSOCK, and
-      # GIVC registration now pass together. Restore just the two protected
-      # service-plane VMs to microvm.nix autostart; keep Ghaf's broad boot
-      # orchestrator disabled so omitted GUI and application VMs stay out.
+      # MGBE0 assignment, protected teardown, TAP networking, AF_VSOCK, and
+      # GIVC registration pass together. Autostart the three selected protected
+      # VMs while the broad boot orchestrator stays disabled, so GUIVM and
+      # FlatpakVM remain out of this image.
       microvm.vms = {
         "admin-vm".autostart = lib.mkForce true;
         "net-vm".autostart = lib.mkForce true;
+        "chromium-vm".autostart = lib.mkForce true;
       };
     };
 
