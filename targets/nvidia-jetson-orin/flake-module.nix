@@ -452,11 +452,23 @@ let
       };
       systemd.services."microvm@net-vm" = {
         requires = [ "pkvm-mgbe0-clocks.service" ];
-        after = [ "pkvm-mgbe0-clocks.service" ];
+        # AdminVM owns the GIVC control plane. Start it first so NetVM's agent
+        # can register as soon as its internal TAP becomes routable, but keep
+        # NetVM available for recovery if the control plane itself fails.
+        wants = [ "microvm@admin-vm.service" ];
+        after = [
+          "microvm@admin-vm.service"
+          "pkvm-mgbe0-clocks.service"
+        ];
       };
+
+      # MGBE0 assignment, protected teardown, the TAP network, AF_VSOCK, and
+      # GIVC registration now pass together. Restore just the two protected
+      # service-plane VMs to microvm.nix autostart; keep Ghaf's broad boot
+      # orchestrator disabled so omitted GUI and application VMs stay out.
       microvm.vms = {
-        "admin-vm".autostart = lib.mkForce false;
-        "net-vm".autostart = lib.mkForce false;
+        "admin-vm".autostart = lib.mkForce true;
+        "net-vm".autostart = lib.mkForce true;
       };
     };
 
