@@ -1,0 +1,37 @@
+From d1b659bb3014506c809173c219b999f723771e53 Mon Sep 17 00:00:00 2001
+From: vadik likholetov <vadikas@gmail.com>
+Date: Tue, 18 Aug 2026 22:14:05 +0300
+Subject: [PATCH] iommu: tegra-pkvm: report device cache coherency
+
+Report cache coherency for dma-coherent devices so VFIO can register physical platform devices behind the Tegra pKVM IOMMU provider.
+
+Signed-off-by: vadik likholetov <vadikas@gmail.com>
+---
+ drivers/iommu/arm-smmu-tegra-pkvm.c | 11 +++++++++++
+ 1 file changed, 11 insertions(+)
+
+diff --git a/drivers/iommu/arm-smmu-tegra-pkvm.c b/drivers/iommu/arm-smmu-tegra-pkvm.c
+index d33a43edd..ccf6b71c3 100644
+--- a/drivers/iommu/arm-smmu-tegra-pkvm.c
++++ b/drivers/iommu/arm-smmu-tegra-pkvm.c
+@@ -484,9 +484,20 @@ static int pkvm_tegra_default_domain(struct device *dev)
+ 	return IOMMU_DOMAIN_IDENTITY;
+ }
+ 
++static bool pkvm_tegra_capable(struct device *dev, enum iommu_cap cap)
++{
++	switch (cap) {
++	case IOMMU_CAP_CACHE_COHERENCY:
++		return device_get_dma_attr(dev) == DEV_DMA_COHERENT;
++	default:
++		return false;
++	}
++}
++
+ static const struct iommu_ops pkvm_tegra_iommu_ops = {
+ 	.identity_domain = &pkvm_tegra_identity_domain,
+ 	.blocked_domain = &pkvm_tegra_blocked_domain,
++	.capable = pkvm_tegra_capable,
+ 	.domain_alloc_paging = pkvm_tegra_domain_alloc_paging,
+ 	.probe_device = pkvm_tegra_probe_device,
+ 	.release_device = pkvm_tegra_release_device,

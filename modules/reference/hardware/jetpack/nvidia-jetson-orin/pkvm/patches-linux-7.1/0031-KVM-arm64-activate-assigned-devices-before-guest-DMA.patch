@@ -1,0 +1,287 @@
+From 7c047e45289d20a51a79d6da5b3e151f674da5c7 Mon Sep 17 00:00:00 2001
+From: vadik likholetov <vadikas@gmail.com>
+Date: Wed, 19 Aug 2026 00:55:48 +0300
+Subject: [PATCH] KVM: arm64: activate assigned devices before guest DMA
+
+Protected guests can attach an IOMMU domain before first accessing a device MMIO region. Assign and reset the device from the guest DMA path as well as the MMIO fault path.
+
+Restore device-PFN handling in the Linux 7.1 protected fault path so donated MMIO can be mapped into the guest. Let the Tegra backend allocate the upper-half domain IDs and ANY-type domains used by pvIOMMU, and harden cleanup reached by failed probes.
+---
+ arch/arm64/include/asm/kvm_pkvm.h          | 18 ++++++++++++++
+ arch/arm64/kvm/hyp/nvhe/device/device.c    | 15 +++++++++++
+ arch/arm64/kvm/hyp/nvhe/iommu/pviommu.c    |  5 +++-
+ arch/arm64/kvm/hyp/nvhe/iommu/tegra-smmu.c | 20 +++++++++------
+ arch/arm64/kvm/mmu.c                       | 29 +++++++++++++++++++++-
+ drivers/iommu/pkvm-pviommu.c               | 22 ++++++++++++----
+ 6 files changed, 95 insertions(+), 14 deletions(-)
+
+diff --git a/arch/arm64/include/asm/kvm_pkvm.h b/arch/arm64/include/asm/kvm_pkvm.h
+index 2954b3111..c592b7fac 100644
+--- a/arch/arm64/include/asm/kvm_pkvm.h
++++ b/arch/arm64/include/asm/kvm_pkvm.h
+@@ -200,6 +200,24 @@ struct pkvm_mapping {
+ 	u64 __subtree_last;	/* Internal member for interval tree */
+ };
+ 
++#define kvm_call_refill_hyp_nvhe(f, ...)                            \
++({                                                                  \
++	struct arm_smccc_res res;                                    \
++	int __ret;                                                   \
++	do {                                                        \
++		__ret = -1;                                          \
++		arm_smccc_1_1_hvc(KVM_HOST_SMCCC_FUNC(f),            \
++				  ##__VA_ARGS__, &res);                  \
++		if (WARN_ON(res.a0 != SMCCC_RET_SUCCESS))             \
++			break;                                         \
++		__ret = res.a1;                                      \
++		if (!__ret)                                          \
++			break;                                         \
++		__ret = __pkvm_handle_smccc_req(&res, NULL);          \
++	} while (!__ret);                                             \
++	__ret;                                                       \
++})
++
+ int pkvm_pgtable_stage2_init(struct kvm_pgtable *pgt, struct kvm_s2_mmu *mmu,
+ 			     struct kvm_pgtable_mm_ops *mm_ops);
+ void pkvm_pgtable_stage2_destroy_range(struct kvm_pgtable *pgt,
+diff --git a/arch/arm64/kvm/hyp/nvhe/device/device.c b/arch/arm64/kvm/hyp/nvhe/device/device.c
+index e1d0f5562..94c864f15 100644
+--- a/arch/arm64/kvm/hyp/nvhe/device/device.c
++++ b/arch/arm64/kvm/hyp/nvhe/device/device.c
+@@ -421,12 +421,27 @@ int pkvm_devices_get_context(u64 iommu_id, u32 endpoint_id, struct pkvm_hyp_vm *
+ 		return vm ? -EPERM : 0;
+ 
+ 	hyp_spin_lock(&device_spinlock);
++	/*
++	 * A guest can attach its DMA domain before it accesses any of the
++	 * device's MMIO regions.  In that case, the stage-2 fault path has not
++	 * had a chance to assign and reset the device yet.  Treat the first
++	 * guest IOMMU operation as an assignment point as well so that DMA can
++	 * be configured before the driver starts touching registers.
++	 */
++	if (vm && !dev->ctxt) {
++		ret = __pkvm_group_assign(dev->group_id, vm);
++		if (ret)
++			goto out;
++	}
++
+ 	if (dev->ctxt != vm)
+ 		ret = -EPERM;
+ 	else if (dev->refcount == USHRT_MAX)
+ 		ret = -EOVERFLOW;
+ 	else
+ 		dev->refcount++;
++
++out:
+ 	hyp_spin_unlock(&device_spinlock);
+ 	return ret;
+ }
+diff --git a/arch/arm64/kvm/hyp/nvhe/iommu/pviommu.c b/arch/arm64/kvm/hyp/nvhe/iommu/pviommu.c
+index 383fd021f..4b7055deb 100644
+--- a/arch/arm64/kvm/hyp/nvhe/iommu/pviommu.c
++++ b/arch/arm64/kvm/hyp/nvhe/iommu/pviommu.c
+@@ -76,6 +76,7 @@ static void pkvm_pviommu_hyp_req(u64 *exit_code)
+ static bool pkvm_guest_iommu_attach_dev(struct pkvm_hyp_vcpu *hyp_vcpu, u64 *exit_code)
+ {
+ 	int ret;
++	u64 stage = 1;
+ 	struct kvm_vcpu *vcpu = &hyp_vcpu->vcpu;
+ 	u64 iommu_id = smccc_get_arg2(vcpu);
+ 	u64 sid = smccc_get_arg3(vcpu);
+@@ -91,6 +92,7 @@ static bool pkvm_guest_iommu_attach_dev(struct pkvm_hyp_vcpu *hyp_vcpu, u64 *exi
+ 	iommu_id = route.iommu;
+ 	sid = route.sid;
+ 
++	stage = 2;
+ 	ret = kvm_iommu_alloc_domain(pviommu_drv_id, iommu_id, domain_id, KVM_IOMMU_DOMAIN_ANY_TYPE);
+ 	if (ret == -ENOMEM) {
+ 		pkvm_pviommu_hyp_req(exit_code);
+@@ -99,6 +101,7 @@ static bool pkvm_guest_iommu_attach_dev(struct pkvm_hyp_vcpu *hyp_vcpu, u64 *exi
+ 		goto out_ret;
+ 	}
+ 
++	stage = 3;
+ 	ret = kvm_iommu_attach_dev(iommu_id, domain_id, sid, pasid, pasid_bits, 0);
+ 	if (ret == -ENOMEM) {
+ 		WARN_ON(kvm_iommu_free_domain(domain_id));
+@@ -111,7 +114,7 @@ static bool pkvm_guest_iommu_attach_dev(struct pkvm_hyp_vcpu *hyp_vcpu, u64 *exi
+ 	}
+ out_ret:
+ 	smccc_set_retval(vcpu, ret ?  SMCCC_RET_INVALID_PARAMETER : SMCCC_RET_SUCCESS,
+-			 0, 0, 0);
++			 (u64)(s64)ret, stage, sid);
+ 	return true;
+ }
+ 
+diff --git a/arch/arm64/kvm/hyp/nvhe/iommu/tegra-smmu.c b/arch/arm64/kvm/hyp/nvhe/iommu/tegra-smmu.c
+index 1e80179bb..bf809c788 100644
+--- a/arch/arm64/kvm/hyp/nvhe/iommu/tegra-smmu.c
++++ b/arch/arm64/kvm/hyp/nvhe/iommu/tegra-smmu.c
+@@ -74,7 +74,7 @@ static struct pkvm_tegra_hyp_smmu
+ 	tegra_smmus[PKVM_TEGRA_SMMU_MAX_DEVICES];
+ static struct pkvm_tegra_hyp_domain tegra_identity_domain;
+ static struct pkvm_tegra_hyp_domain
+-	*tegra_host_domains[KVM_IOMMU_MAX_HOST_DOMAINS];
++	*tegra_domains[KVM_IOMMU_MAX_DOMAINS];
+ static struct kvm_pgtable_mm_ops tegra_identity_mm_ops;
+ static struct kvm_pgtable_mm_ops tegra_domain_mm_ops;
+ static bool tegra_noncoherent_walk;
+@@ -618,8 +618,14 @@ static int tegra_alloc_domain(pkvm_handle_t iommu_id,
+ 	unsigned int cb;
+ 	int ret;
+ 
+-	if (!smmu || type != 1 ||
+-	    core_domain->domain_id >= KVM_IOMMU_MAX_HOST_DOMAINS)
++	/*
++	 * Host domains request the unmanaged type (1), while pvIOMMU guest
++	 * domains use KVM_IOMMU_DOMAIN_ANY_TYPE.  Both are backed by the same
++	 * stage-2 page-table implementation here.
++	 */
++	if (!smmu ||
++	    (type != KVM_IOMMU_DOMAIN_ANY_TYPE && type != 1) ||
++	    core_domain->domain_id >= KVM_IOMMU_MAX_DOMAINS)
+ 		return -EINVAL;
+ 	domain = hyp_alloc(sizeof(*domain));
+ 	if (!domain) {
+@@ -650,7 +656,7 @@ static int tegra_alloc_domain(pkvm_handle_t iommu_id,
+ 		goto err_cb;
+ 	tegra_program_context(smmu, domain);
+ 	core_domain->priv = domain;
+-	tegra_host_domains[core_domain->domain_id] = domain;
++	tegra_domains[core_domain->domain_id] = domain;
+ 	return 0;
+ 
+ err_cb:
+@@ -685,7 +691,7 @@ static void tegra_free_domain(struct kvm_hyp_iommu_domain *core_domain)
+ 
+ 	if (!domain)
+ 		return;
+-	tegra_host_domains[core_domain->domain_id] = NULL;
++	tegra_domains[core_domain->domain_id] = NULL;
+ 	tegra_smmu_cb_write(domain->smmu, domain->cb,
+ 			    PKVM_SMMU_CB_SCTLR, 0);
+ 	WARN_ON(tegra_smmu_flush_vmid(domain->smmu, domain->vmid));
+@@ -953,9 +959,9 @@ static int tegra_debug_read(pkvm_handle_t iommu_id, u32 selector,
+ 		unsigned int instance;
+ 		unsigned int spin;
+ 
+-		if (domain_id >= KVM_IOMMU_MAX_HOST_DOMAINS)
++		if (domain_id >= KVM_IOMMU_MAX_DOMAINS)
+ 			return -EINVAL;
+-		domain = tegra_host_domains[domain_id];
++		domain = tegra_domains[domain_id];
+ 		if (!domain || domain->smmu != smmu)
+ 			return -ENOENT;
+ 		cb = tegra_smmu_cb(smmu, 0, domain->cb);
+diff --git a/arch/arm64/kvm/mmu.c b/arch/arm64/kvm/mmu.c
+index 7e16cba40..f9511baef 100644
+--- a/arch/arm64/kvm/mmu.c
++++ b/arch/arm64/kvm/mmu.c
+@@ -1669,6 +1669,31 @@ struct kvm_s2_fault_vma_info {
+ 	bool		map_non_cacheable;
+ };
+ 
++static int pkvm_mem_abort_device(const struct kvm_s2_fault_desc *s2fd)
++{
++	bool writable;
++	struct page *page;
++	kvm_pfn_t pfn;
++	gfn_t gfn;
++	int ret;
++
++	gfn = s2fd->fault_ipa >> PAGE_SHIFT;
++	pfn = __kvm_faultin_pfn(s2fd->memslot, gfn,
++				kvm_is_write_fault(s2fd->vcpu) ? FOLL_WRITE : 0,
++				&writable, &page);
++	if (is_error_noslot_pfn(pfn))
++		return -EREMOTEIO;
++
++	if (pfn_is_map_memory(pfn)) {
++		kvm_release_faultin_page(s2fd->vcpu->kvm, page, true, writable);
++		return -EREMOTEIO;
++	}
++
++	ret = kvm_call_refill_hyp_nvhe(__pkvm_host_map_guest_mmio, pfn, gfn);
++	/* Another vCPU may have completed the mapping first. */
++	return ret == -EEXIST ? 0 : ret;
++}
++
+ static int pkvm_mem_abort(const struct kvm_s2_fault_desc *s2fd)
+ {
+ 	unsigned int flags = FOLL_HWPOISON | FOLL_LONGTERM | FOLL_WRITE;
+@@ -1698,7 +1723,9 @@ static int pkvm_mem_abort(const struct kvm_s2_fault_desc *s2fd)
+ 		ret = 0;
+ 		goto dec_account;
+ 	} else if (ret != 1) {
+-		ret = -EFAULT;
++		ret = pkvm_mem_abort_device(s2fd);
++		if (ret == -EREMOTEIO)
++			ret = -EFAULT;
+ 		goto dec_account;
+ 	} else if (!folio_test_swapbacked(page_folio(page))) {
+ 		/*
+diff --git a/drivers/iommu/pkvm-pviommu.c b/drivers/iommu/pkvm-pviommu.c
+index 0f4407fb0..299207b12 100644
+--- a/drivers/iommu/pkvm-pviommu.c
++++ b/drivers/iommu/pkvm-pviommu.c
+@@ -204,15 +204,18 @@ static void pviommu_remove_dev_pasid(struct device *dev, ioasid_t pasid,
+ {
+ 	struct pviommu_master *master = dev_iommu_priv_get(dev);
+ 	struct iommu_fwspec *fwspec = dev_iommu_fwspec_get(dev);
+-	struct pviommu *pv = master->iommu;
+-	struct pviommu_domain *pv_domain = container_of(domain, struct pviommu_domain, domain);
++	struct pviommu_domain *pv_domain;
++	struct pviommu *pv;
+ 	struct arm_smccc_res res;
+ 	u32 sid;
+ 	int i;
+ 
+-	if (!fwspec || !pv_domain)
++	if (!master || !fwspec || !domain)
+ 		return;
+ 
++	pv = master->iommu;
++	pv_domain = container_of(domain, struct pviommu_domain, domain);
++
+ 	for (i = 0; i < fwspec->num_ids; i++) {
+ 		sid = fwspec->ids[i];
+ 		arm_smccc_1_1_hvc(ARM_SMCCC_VENDOR_HYP_KVM_PVIOMMU_OP_FUNC_ID,
+@@ -252,6 +255,10 @@ static int pviommu_set_dev_pasid(struct iommu_domain *domain,
+ 				  pv->id, sid, pasid,
+ 				  pv_domain->id, master->ssid_bits, &res);
+ 		if (res.a0) {
++			dev_err(dev,
++				"attach_dev sid %u failed: smccc %ld, hyp %ld, stage %lu, endpoint %lu\n",
++				sid, (long)res.a0, (long)res.a1, res.a2,
++				res.a3);
+ 			ret = smccc_to_linux_ret(res.a0);
+ 			break;
+ 		}
+@@ -303,9 +310,13 @@ static struct platform_driver pkvm_pviommu_driver;
+ static struct pviommu *pviommu_get_by_fwnode(struct fwnode_handle *fwnode)
+ {
+ 	struct device *dev = bus_find_device_by_fwnode(&platform_bus_type, fwnode);
++	struct pviommu *pv;
+ 
++	if (!dev)
++		return NULL;
++	pv = dev_get_drvdata(dev);
+ 	put_device(dev);
+-	return dev ? dev_get_drvdata(dev) : NULL;
++	return pv;
+ }
+ 
+ static struct iommu_ops pviommu_ops;
+@@ -340,7 +351,8 @@ static void pviommu_release_device(struct device *dev)
+ 	struct pviommu_master *master = dev_iommu_priv_get(dev);
+ 	struct iommu_domain *domain = iommu_get_domain_for_dev(dev);
+ 
+-	pviommu_detach_dev(master, domain);
++	if (master && domain)
++		pviommu_detach_dev(master, domain);
+ }
+ 
+ static int pviommu_of_xlate(struct device *dev, const struct of_phandle_args *args)
+-- 
+2.55.0
+

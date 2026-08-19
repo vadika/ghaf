@@ -1,0 +1,24 @@
+From bde0be36c4d5eb633bd35c548bb01b9c4462b89f Mon Sep 17 00:00:00 2001
+From: vadik likholetov <vadikas@gmail.com>
+Date: Tue, 18 Aug 2026 23:09:11 +0300
+Subject: [PATCH] vfio: allow arm64 KVM group assignment
+
+Signed-off-by: vadik likholetov <vadikas@gmail.com>
+---
+ drivers/vfio/group.c | 3 ---
+ 1 file changed, 3 deletions(-)
+
+diff --git a/drivers/vfio/group.c b/drivers/vfio/group.c
+index b2299e5bc..0892c4ad7 100644
+--- a/drivers/vfio/group.c
++++ b/drivers/vfio/group.c
+@@ -811,9 +811,6 @@ struct iommu_group *vfio_file_iommu_group(struct file *file)
+ 	struct vfio_group *group = vfio_group_from_file(file);
+ 	struct iommu_group *iommu_group = NULL;
+ 
+-	if (!IS_ENABLED(CONFIG_SPAPR_TCE_IOMMU))
+-		return NULL;
+-
+ 	if (!group)
+ 		return NULL;
+ 

@@ -1,0 +1,35 @@
+From d3a80bdca15fd914be453d382789904432057518 Mon Sep 17 00:00:00 2001
+From: vadik likholetov <vadikas@gmail.com>
+Date: Tue, 18 Aug 2026 23:58:33 +0300
+Subject: [PATCH] KVM: arm64: avoid cache maintenance on assigned MMIO
+
+The protected-device donation path maps an MMIO aperture with Device
+attributes and then performs cache maintenance by VA on its first page.
+Tegra234 forwards that operation to the device fabric, which reports an
+uncorrectable CBB error for every MGBE resource and locks the host before
+device reset can run.
+
+MMIO mappings do not allocate cache lines. Remove the cache operation so
+donation only changes ownership and the trusted reset remains the first
+EL2 device access.
+---
+ arch/arm64/kvm/hyp/nvhe/device/device.c | 3 ---
+ 1 file changed, 3 deletions(-)
+
+diff --git a/arch/arm64/kvm/hyp/nvhe/device/device.c b/arch/arm64/kvm/hyp/nvhe/device/device.c
+index fb04b567d..e1d0f5562 100644
+--- a/arch/arm64/kvm/hyp/nvhe/device/device.c
++++ b/arch/arm64/kvm/hyp/nvhe/device/device.c
+@@ -120,9 +120,6 @@ int pkvm_device_hyp_assign_mmio(u64 pfn, u64 nr_pages)
+ 	}
+ 
+ 	ret = pkvm_host_donate_hyp_mmio(pfn, nr_pages, PAGE_HYP_DEVICE);
+-	/* Hyp have device mapping, while host may have issue cacheable writes.*/
+-	if (!ret)
+-		kvm_flush_dcache_to_poc(__hyp_va(phys), PAGE_SIZE);
+ 
+ out_unlock:
+ 	hyp_spin_unlock(&device_spinlock);
+-- 
+2.55.0
+

@@ -41,10 +41,9 @@ let
     self.nixosModules.profiles
   ];
 
-  linux71PkvmGuestModule =
-    { lib, pkgs, ... }:
+  linux71PkvmGuestSupportModule =
+    { lib, ... }:
     {
-      boot.kernelPackages = lib.mkForce pkgs.linuxPackages_7_1;
       boot.kernelPatches = [
         {
           name = "Arm pKVM guest support";
@@ -57,6 +56,13 @@ let
       ];
     };
 
+  linux71PkvmGuestModule =
+    { lib, pkgs, ... }:
+    {
+      imports = [ linux71PkvmGuestSupportModule ];
+      boot.kernelPackages = lib.mkForce pkgs.linuxPackages_7_1;
+    };
+
   linux71PkvmAssignedGuestModule =
     { lib, ... }:
     {
@@ -67,6 +73,14 @@ let
           structuredExtraConfig = with lib.kernel; {
             PKVM_PVIOMMU = yes;
           };
+        }
+        {
+          name = "Arm pKVM guest attach diagnostics";
+          patch = ../../modules/reference/hardware/jetpack/nvidia-jetson-orin/pkvm/patches-linux-7.1/0032-iommu-pkvm-pviommu-report-EL2-attach-failures.patch;
+        }
+        {
+          name = "Tegra MGBE pKVM guest DMA routing";
+          patch = ../../modules/reference/hardware/jetpack/nvidia-jetson-orin/pkvm/patches-linux-7.1/0035-net-stmmac-limit-MGBE-pKVM-guest-DMA-to-32-bits.patch;
         }
       ];
     };
@@ -186,7 +200,14 @@ let
       # The DSU PMU CPU-online callback accesses a system register that pKVM's
       # protected hypervisor traps on Orin, causing an EL2 BUG and host panic. The
       # pKVM canary does not need DSU uncore performance counters.
-      boot.blacklistedKernelModules = [ "arm_dsu_pmu" ];
+      boot.blacklistedKernelModules = [
+        "arm_dsu_pmu"
+        # GUIVM is disabled in this target, so its high-IOVA display anchor has
+        # no consumer. The pKVM host gives that anchor an identity IOMMU domain;
+        # loading it would call iommu_map() on a non-paging domain and trigger a
+        # host warning during every boot.
+        "dce-iso-anchor"
+      ];
 
       # Keep host-IOMMU debug iterations small. The combined GUI VM and the
       # Chromium and Flatpak AppVMs do not participate in host eMMC/SMMU
@@ -310,6 +331,30 @@ let
           patch = ../../modules/reference/hardware/jetpack/nvidia-jetson-orin/pkvm/patches-linux-7.1/0027-iommu-tegra-pkvm-allow-unmatched-host-streams-during-bring-up.patch;
         }
         {
+          name = "Tegra pKVM cache coherency capability";
+          patch = ../../modules/reference/hardware/jetpack/nvidia-jetson-orin/pkvm/patches-linux-7.1/0028-iommu-tegra-pkvm-report-device-cache-coherency.patch;
+        }
+        {
+          name = "VFIO arm64 KVM group assignment";
+          patch = ../../modules/reference/hardware/jetpack/nvidia-jetson-orin/pkvm/patches-linux-7.1/0029-vfio-allow-arm64-kvm-group-assignment.patch;
+        }
+        {
+          name = "Arm pKVM assigned-MMIO cache maintenance";
+          patch = ../../modules/reference/hardware/jetpack/nvidia-jetson-orin/pkvm/patches-linux-7.1/0030-KVM-arm64-avoid-cache-maintenance-on-assigned-MMIO.patch;
+        }
+        {
+          name = "Arm pKVM assigned-device activation";
+          patch = ../../modules/reference/hardware/jetpack/nvidia-jetson-orin/pkvm/patches-linux-7.1/0031-KVM-arm64-activate-assigned-devices-before-guest-DMA.patch;
+        }
+        {
+          name = "Tegra pKVM IOMMU translation-cache maintenance";
+          patch = ../../modules/reference/hardware/jetpack/nvidia-jetson-orin/pkvm/patches-linux-7.1/0033-KVM-arm64-let-IOMMU-page-tables-flush-their-own-TLBs.patch;
+        }
+        {
+          name = "Tegra pKVM teardown reset MMIO reclaim";
+          patch = ../../modules/reference/hardware/jetpack/nvidia-jetson-orin/pkvm/patches-linux-7.1/0034-KVM-arm64-reclaim-MGBE-reset-MMIO-during-teardown.patch;
+        }
+        {
           name = "Tegra pKVM protected-device configuration";
           patch = null;
           structuredExtraConfig = with lib.kernel; {
@@ -378,12 +423,37 @@ let
         protectedVmWithoutFirmwareModule
       ];
       ghaf.virtualization.vmConfig.sysvms.netvm.extraModules = [
+        linux71PkvmGuestSupportModule
         linux71PkvmAssignedGuestModule
         protectedVmWithoutFirmwareModule
         {
           microvm.crosvm.protection.allowDeviceAssignment = true;
         }
       ];
+
+      # EL2 must reset MGBE0 before assigning it to a protected guest and
+      # again while reclaiming it. Keep the BPMP clock votes alive across the
+      # complete assignment lifetime; touching the powered-down MAC from nVHE
+      # can raise an external abort instead of returning a reset error.
+      systemd.services.pkvm-mgbe0-clocks = {
+        description = "Keep MGBE0 clocks enabled for protected assignment";
+        wantedBy = [ "multi-user.target" ];
+        before = [ "microvm@net-vm.service" ];
+        after = [ "sys-kernel-debug.mount" ];
+        serviceConfig = {
+          Type = "oneshot";
+          RemainAfterExit = true;
+        };
+        script = ''
+          for clock in /sys/kernel/debug/bpmp/debug/clk/mgbe0_*; do
+            echo 1 > "$clock/state"
+          done
+        '';
+      };
+      systemd.services."microvm@net-vm" = {
+        requires = [ "pkvm-mgbe0-clocks.service" ];
+        after = [ "pkvm-mgbe0-clocks.service" ];
+      };
       microvm.vms = {
         "admin-vm".autostart = lib.mkForce false;
         "net-vm".autostart = lib.mkForce false;

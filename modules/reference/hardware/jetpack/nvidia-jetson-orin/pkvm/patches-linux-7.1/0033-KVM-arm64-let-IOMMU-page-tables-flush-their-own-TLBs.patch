@@ -1,0 +1,143 @@
+From 5b73fb6bb98da8f2bfd3963176884a5fe3a712ad Mon Sep 17 00:00:00 2001
+From: vadik likholetov <vadikas@gmail.com>
+Date: Wed, 19 Aug 2026 05:45:12 +0300
+Subject: [PATCH] KVM: arm64: let IOMMU page tables flush their own TLBs
+
+---
+ arch/arm64/include/asm/kvm_pgtable.h       |  4 +++
+ arch/arm64/kvm/hyp/nvhe/iommu/tegra-smmu.c | 10 ++++++++
+ arch/arm64/kvm/hyp/pgtable.c               | 29 +++++++++++++++++++---
+ 3 files changed, 40 insertions(+), 3 deletions(-)
+
+diff --git a/arch/arm64/include/asm/kvm_pgtable.h b/arch/arm64/include/asm/kvm_pgtable.h
+index 41a868793..7a7aa768d 100644
+--- a/arch/arm64/include/asm/kvm_pgtable.h
++++ b/arch/arm64/include/asm/kvm_pgtable.h
+@@ -230,6 +230,9 @@ static inline bool kvm_is_block_size_supported(u64 size)
+  *				for the	specified memory address range.
+  * @icache_inval_pou:		Invalidate the instruction cache to the PoU
+  *				for the specified memory address range.
++ * @stage2_flush_tlb:		Optional full translation-cache invalidation for
++ *				a non-CPU stage-2 page-table user. KVM performs
++ *				architectural CPU TLBI when this is unset.
+  */
+ struct kvm_pgtable_mm_ops {
+ 	void*		(*zalloc_page)(void *arg);
+@@ -243,6 +246,7 @@ struct kvm_pgtable_mm_ops {
+ 	phys_addr_t	(*virt_to_phys)(void *addr);
+ 	void		(*dcache_clean_inval_poc)(void *addr, size_t size);
+ 	void		(*icache_inval_pou)(void *addr, size_t size);
++	void		(*stage2_flush_tlb)(struct kvm_s2_mmu *mmu);
+ };
+ 
+ /**
+diff --git a/arch/arm64/kvm/hyp/nvhe/iommu/tegra-smmu.c b/arch/arm64/kvm/hyp/nvhe/iommu/tegra-smmu.c
+index bf809c788..45d5e2c01 100644
+--- a/arch/arm64/kvm/hyp/nvhe/iommu/tegra-smmu.c
++++ b/arch/arm64/kvm/hyp/nvhe/iommu/tegra-smmu.c
+@@ -193,6 +193,14 @@ static int tegra_smmu_flush_vmid(struct pkvm_tegra_hyp_smmu *smmu, u16 vmid)
+ 	return tegra_smmu_tlb_sync(smmu);
+ }
+ 
++static void tegra_pgtable_flush_tlb(struct kvm_s2_mmu *mmu)
++{
++	struct pkvm_tegra_hyp_domain *domain;
++
++	domain = container_of(mmu, struct pkvm_tegra_hyp_domain, mmu);
++	WARN_ON(tegra_smmu_flush_vmid(domain->smmu, domain->vmid));
++}
++
+ static void *tegra_atomic_zalloc_page(void *arg)
+ {
+ 	return kvm_iommu_donate_pages_atomic(0);
+@@ -1203,6 +1211,7 @@ static int tegra_init(pkvm_handle_t driver_id)
+ 		.page_count = tegra_page_count,
+ 		.phys_to_virt = hyp_phys_to_virt,
+ 		.virt_to_phys = hyp_virt_to_phys,
++		.stage2_flush_tlb = tegra_pgtable_flush_tlb,
+ 	};
+ 	tegra_domain_mm_ops = (struct kvm_pgtable_mm_ops) {
+ 		.zalloc_page = tegra_domain_zalloc_page,
+@@ -1214,6 +1223,7 @@ static int tegra_init(pkvm_handle_t driver_id)
+ 		.page_count = tegra_page_count,
+ 		.phys_to_virt = hyp_phys_to_virt,
+ 		.virt_to_phys = hyp_virt_to_phys,
++		.stage2_flush_tlb = tegra_pgtable_flush_tlb,
+ 	};
+ 	memset(&tegra_identity_domain, 0, sizeof(tegra_identity_domain));
+ 	tegra_identity_domain.cb = 0;
+diff --git a/arch/arm64/kvm/hyp/pgtable.c b/arch/arm64/kvm/hyp/pgtable.c
+index f218ac0ec..75f742618 100644
+--- a/arch/arm64/kvm/hyp/pgtable.c
++++ b/arch/arm64/kvm/hyp/pgtable.c
+@@ -646,6 +646,13 @@ void kvm_tlb_flush_vmid_range(struct kvm_s2_mmu *mmu,
+ 				phys_addr_t addr, size_t size)
+ {
+ 	unsigned long pages, inval_pages;
++	void (*flush_tlb)(struct kvm_s2_mmu *mmu);
++
++	flush_tlb = mmu->pgt->mm_ops->stage2_flush_tlb;
++	if (flush_tlb) {
++		flush_tlb(mmu);
++		return;
++	}
+ 
+ 	if (!system_supports_tlb_range()) {
+ 		kvm_call_hyp(__kvm_tlb_flush_vmid, mmu);
+@@ -662,6 +669,17 @@ void kvm_tlb_flush_vmid_range(struct kvm_s2_mmu *mmu,
+ 	}
+ }
+ 
++static bool stage2_flush_tlb(struct kvm_s2_mmu *mmu)
++{
++	void (*flush_tlb)(struct kvm_s2_mmu *mmu);
++
++	flush_tlb = mmu->pgt->mm_ops->stage2_flush_tlb;
++	if (!flush_tlb)
++		return false;
++	flush_tlb(mmu);
++	return true;
++}
++
+ #define KVM_S2_MEMATTR(pgt, attr)					\
+ 	({								\
+ 		kvm_pte_t __attr;					\
+@@ -854,7 +872,7 @@ static bool stage2_try_break_pte(const struct kvm_pgtable_visit_ctx *ctx,
+ 			u64 addr = ALIGN_DOWN(ctx->addr, size);
+ 
+ 			kvm_tlb_flush_vmid_range(mmu, addr, size);
+-		} else if (kvm_pte_valid(ctx->old)) {
++		} else if (kvm_pte_valid(ctx->old) && !stage2_flush_tlb(mmu)) {
+ 			kvm_call_hyp(__kvm_tlb_flush_vmid_ipa, mmu,
+ 				     ctx->addr, ctx->level);
+ 		}
+@@ -880,6 +898,9 @@ static void stage2_make_pte(const struct kvm_pgtable_visit_ctx *ctx, kvm_pte_t n
+ 
+ static bool stage2_unmap_defer_tlb_flush(struct kvm_pgtable *pgt)
+ {
++	if (pgt->mm_ops->stage2_flush_tlb)
++		return true;
++
+ 	/*
+ 	 * If FEAT_TLBIRANGE is implemented, defer the individual
+ 	 * TLB invalidations until the entire walk is finished, and
+@@ -905,7 +926,9 @@ static void stage2_unmap_put_pte(const struct kvm_pgtable_visit_ctx *ctx,
+ 	if (kvm_pte_valid(ctx->old)) {
+ 		kvm_clear_pte(ctx->ptep);
+ 
+-		if (kvm_pte_table(ctx->old, ctx->level)) {
++		if (stage2_flush_tlb(mmu)) {
++			/* The non-CPU stage-2 owner invalidated its translations. */
++		} else if (kvm_pte_table(ctx->old, ctx->level)) {
+ 			kvm_call_hyp(__kvm_tlb_flush_vmid_ipa, mmu, ctx->addr,
+ 				     TLBI_TTL_UNKNOWN);
+ 		} else if (!stage2_unmap_defer_tlb_flush(pgt)) {
+@@ -1378,7 +1401,7 @@ int kvm_pgtable_stage2_relax_perms(struct kvm_pgtable *pgt, u64 addr,
+ 	clr |= ~xn & KVM_PTE_LEAF_ATTR_HI_S2_XN;
+ 
+ 	ret = stage2_update_leaf_attrs(pgt, addr, 1, set, clr, NULL, &level, flags);
+-	if (!ret || ret == -EAGAIN)
++	if ((!ret || ret == -EAGAIN) && !stage2_flush_tlb(pgt->mmu))
+ 		kvm_call_hyp(__kvm_tlb_flush_vmid_ipa_nsh, pgt->mmu, addr,
+ 			     (ret == -EAGAIN) ? TLBI_TTL_UNKNOWN : level);
+ 	return ret;

@@ -1,0 +1,31 @@
+From: Codex <codex@openai.com>
+Date: Wed, 19 Aug 2026 03:20:00 +0300
+Subject: [PATCH] iommu: pkvm-pviommu: report EL2 attach failures
+
+Surface the raw hypervisor status and failing attach stage in the protected
+guest.  The public SMCCC status collapses every failure to -EINVAL, hiding
+whether route lookup, domain allocation, or device attachment failed.
+
+This is temporary bring-up telemetry for the Orin pKVM debug target.
+---
+ drivers/iommu/pkvm-pviommu.c | 4 ++++
+ 1 file changed, 4 insertions(+)
+
+diff --git a/drivers/iommu/pkvm-pviommu.c b/drivers/iommu/pkvm-pviommu.c
+index b5c25f4101a7..d17105d64613 100644
+--- a/drivers/iommu/pkvm-pviommu.c
++++ b/drivers/iommu/pkvm-pviommu.c
+@@ -252,6 +252,10 @@ static int pviommu_set_dev_pasid(struct iommu_domain *domain,
+ 				  pv->id, sid, pasid,
+ 				  pv_domain->id, master->ssid_bits, &res);
+ 		if (res.a0) {
++			dev_err(dev,
++				"attach_dev sid %u failed: smccc %ld, hyp %ld, stage %lu, endpoint %lu\n",
++				sid, (long)res.a0, (long)res.a1, res.a2,
++				res.a3);
+ 			ret = smccc_to_linux_ret(res.a0);
+ 			break;
+ 		}
+-- 
+2.51.0
+

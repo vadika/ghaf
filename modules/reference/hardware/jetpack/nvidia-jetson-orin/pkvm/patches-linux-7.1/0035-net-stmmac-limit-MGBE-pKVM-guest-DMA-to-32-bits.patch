@@ -1,0 +1,42 @@
+From: Vadik Likholetov <vadikas@gmail.com>
+Date: Wed, 19 Aug 2026 11:00:00 +0300
+Subject: [PATCH] net: stmmac: constrain MGBE pKVM guest DMA routing
+
+The pvIOMMU DMA allocator places MGBE descriptors and buffers at the top of
+the 40-bit aperture advertised by the XGMAC. Tegra234 MGBE transactions from
+that aperture reach the memory controller as truncated addresses instead of
+using the protected SMMU context, causing MC decode errors and TX watchdogs.
+
+The pvIOMMU endpoint in the guest device tree is also a virtual stream ID. It
+selects the physical stream through the EL2 routing table, but it is not the
+value that the MGBE wrapper must emit on the wire. Program MGBE0's physical
+stream ID 6 in the wrapper, as the driver did before the stream-ID lookup was
+added.
+
+Keep the pKVM NetVM canary's device-visible IOVAs below 4 GiB and program the
+physical stream ID while retaining the hardware's 40-bit output address
+capability. Either change alone is insufficient: the physical stream ID with
+40-bit top-of-aperture IOVAs still faults, while a 32-bit aperture routed with
+the guest virtual stream ID still times out.
+---
+ drivers/net/ethernet/stmicro/stmmac/dwmac-tegra.c | 5 +++++
+ 1 file changed, 5 insertions(+)
+
+diff --git a/drivers/net/ethernet/stmicro/stmmac/dwmac-tegra.c b/drivers/net/ethernet/stmicro/stmmac/dwmac-tegra.c
+index f92f50715..eb6ccf1d8 100644
+--- a/drivers/net/ethernet/stmicro/stmmac/dwmac-tegra.c
++++ b/drivers/net/ethernet/stmicro/stmmac/dwmac-tegra.c
+@@ -326,6 +326,11 @@ static int tegra_mgbe_probe(struct platform_device *pdev)
+ 	}
+ 
+ 	plat->core_type = DWMAC_CORE_XGMAC;
++	plat->host_dma_width = 32;
++	/* The pvIOMMU endpoint is virtual; the wrapper emits physical SID 6. */
++	mgbe->iommu_sid = 6;
++	dev_info(mgbe->dev, "pKVM DMA aperture 32-bit, physical SID %u\n",
++		 mgbe->iommu_sid);
+ 	plat->flags |= STMMAC_FLAG_TSO_EN;
+ 	plat->pmt = true;
+ 	plat->bsp_priv = mgbe;
+-- 
+2.51.0
