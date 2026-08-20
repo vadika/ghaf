@@ -1,0 +1,49 @@
+From 96fdc6af3ea1ab8f92d6ab5612a0d3d42cfd4d16 Mon Sep 17 00:00:00 2001
+From: Vadik Likholetov <vadikas@gmail.com>
+Date: Thu, 20 Aug 2026 10:15:00 +0300
+Subject: [PATCH] KVM: arm64: allow overlapping host DMA pins
+
+Host DMA mappings can overlap: a device may map the same physical page at
+more than one IOVA, or multiple mappings may temporarily coexist. Each map
+must acquire a reference and each unmap must release one.
+
+The 7.1 device-assignment port instead rejects a host-owned RAM page when
+its reference count is already nonzero. This makes the second legitimate
+mapping fail with -EBUSY and breaks XUSB enumeration.
+
+Follow the Android pKVM ownership invariant: allow every DMA mapping of a
+host-owned page to increment its reference count, and reject transitions
+away from the host-owned state while that count is nonzero. This preserves
+the protection against donation or sharing of DMA-pinned memory without
+forbidding overlapping mappings.
+
+Signed-off-by: Vadik Likholetov <vadikas@gmail.com>
+---
+ arch/arm64/kvm/hyp/nvhe/mem_protect.c | 5 +++--
+ 1 file changed, 3 insertions(+), 2 deletions(-)
+
+diff --git a/arch/arm64/kvm/hyp/nvhe/mem_protect.c b/arch/arm64/kvm/hyp/nvhe/mem_protect.c
+index 991de73f8..71a8f9753 100644
+--- a/arch/arm64/kvm/hyp/nvhe/mem_protect.c
++++ b/arch/arm64/kvm/hyp/nvhe/mem_protect.c
+@@ -815,6 +815,9 @@ static int __host_check_page_state_range(u64 addr, u64 size,
+ 	for_each_hyp_page(page, addr, size) {
+ 		if (get_host_state(page) != state)
+ 			return -EPERM;
++		/* DMA-pinned host pages cannot change ownership or sharing state. */
++		if (state == PKVM_PAGE_OWNED && page->refcount)
++			return -EBUSY;
+ 	}
+ 
+ 	return 0;
+@@ -1732,8 +1735,6 @@ static int __host_check_dma_state_range(u64 addr, u64 size,
+ 	for_each_hyp_page(page, addr, size) {
+ 		if (get_host_state(page) != state)
+ 			return -EPERM;
+-		if (state == PKVM_PAGE_OWNED && page->refcount)
+-			return -EBUSY;
+ 	}
+ 
+ 	return 0;
+-- 
+2.50.1

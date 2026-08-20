@@ -207,6 +207,9 @@ let
         # loading it would call iommu_map() on a non-paging domain and trigger a
         # host warning during every boot.
         "dce-iso-anchor"
+        # PCI protected assignment is not implemented yet. Leave the onboard
+        # Realtek endpoint unbound so the excluded device cannot initiate DMA.
+        "rtw88_8822ce"
       ];
 
       # Keep host-IOMMU debug iterations small. GUIVM and FlatpakVM do not
@@ -357,6 +360,30 @@ let
         {
           name = "Tegra pKVM teardown reset MMIO reclaim";
           patch = ../../modules/reference/hardware/jetpack/nvidia-jetson-orin/pkvm/patches-linux-7.1/0034-KVM-arm64-reclaim-MGBE-reset-MMIO-during-teardown.patch;
+        }
+        {
+          name = "Tegra pKVM translated XUSB DMA";
+          patch = ../../modules/reference/hardware/jetpack/nvidia-jetson-orin/pkvm/patches-linux-7.1/0035-iommu-tegra-pkvm-use-translated-DMA-for-XUSB.patch;
+        }
+        {
+          name = "Tegra pKVM masked stream matching";
+          patch = ../../modules/reference/hardware/jetpack/nvidia-jetson-orin/pkvm/patches-linux-7.1/0036-iommu-tegra-pkvm-honor-stream-match-masks.patch;
+        }
+        {
+          name = "Tegra pKVM stream routing diagnostics";
+          patch = ../../modules/reference/hardware/jetpack/nvidia-jetson-orin/pkvm/patches-linux-7.1/0037-iommu-tegra-pkvm-diagnose-stream-routing.patch;
+        }
+        {
+          name = "Tegra pKVM fwspec stream mask normalization";
+          patch = ../../modules/reference/hardware/jetpack/nvidia-jetson-orin/pkvm/patches-linux-7.1/0038-iommu-tegra-pkvm-normalize-stream-match-masks.patch;
+        }
+        {
+          name = "Arm pKVM overlapping host DMA pins";
+          patch = ../../modules/reference/hardware/jetpack/nvidia-jetson-orin/pkvm/patches-linux-7.1/0039-KVM-arm64-allow-overlapping-host-DMA-pins.patch;
+        }
+        {
+          name = "Tegra pKVM raw pvIOMMU stream IDs";
+          patch = ../../modules/reference/hardware/jetpack/nvidia-jetson-orin/pkvm/patches-linux-7.1/0040-iommu-tegra-pkvm-export-raw-pviommu-stream-IDs.patch;
         }
         {
           name = "Tegra pKVM protected-device configuration";

@@ -1,0 +1,38 @@
+From 174cf5fb55ad06b6fbbbf4d8050ff4778befae63 Mon Sep 17 00:00:00 2001
+From: Vadik Likholetov <vadikas@gmail.com>
+Date: Thu, 20 Aug 2026 21:00:00 +0300
+Subject: [PATCH] iommu: tegra-pkvm: export raw pvIOMMU stream IDs
+
+Protected-device registration reads the endpoint directly from the device
+tree and therefore records raw stream ID 6 for MGBE0.  When the pKVM Tegra
+IOMMU driver probes first, its firmware specification contains the provider
+stream-match mask packed above that ID.  Returning the packed value from
+get_device_iommu_id() makes pvIOMMU route the guest's virtual SID to
+0x7f800006, which cannot match the registered endpoint and fails the guest
+attach with -EPERM.
+
+Keep the stream-match mask at the Tegra SMMU hardware-routing boundary and
+return the raw stream ID through the generic protected-device API.  This
+keeps the endpoint identity consistent between protected-device registration
+and pvIOMMU without weakening the masked SMR programmed by EL2.
+
+Signed-off-by: Vadik Likholetov <vadikas@gmail.com>
+---
+ drivers/iommu/arm-smmu-tegra-pkvm.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/drivers/iommu/arm-smmu-tegra-pkvm.c b/drivers/iommu/arm-smmu-tegra-pkvm.c
+index e3a8bbd49..ac98d29ef 100644
+--- a/drivers/iommu/arm-smmu-tegra-pkvm.c
++++ b/drivers/iommu/arm-smmu-tegra-pkvm.c
+@@ -514,7 +514,7 @@ static int pkvm_tegra_device_id(struct device *dev, u32 idx,
+ 	if (idx >= fwspec->num_ids)
+ 		return -ENOENT;
+ 	*out_iommu = master->smmu->id;
+-	*out_sid = fwspec->ids[idx];
++	*out_sid = FIELD_GET(PKVM_SMMU_SMR_ID, fwspec->ids[idx]);
+ 	return 0;
+ }
+ 
+-- 
+2.55.0

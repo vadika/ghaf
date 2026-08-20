@@ -104,6 +104,11 @@ in
       message = "Protected device assignment requires `iommu = \"pkvm-iommu\"` for every assigned device.";
     }
     {
+      assertion =
+        !protection.allowDeviceAssignment || lib.all ({ bus, ... }: bus == "platform") cfg.devices;
+      message = "Protected device assignment currently supports platform devices only; PCI requires a pKVM reset and ownership backend.";
+    }
+    {
       assertion = !isProtected || cfg.devices == [ ] || protection.allowDeviceAssignment;
       message = "Crosvm protected MicroVM device assignment requires an explicit backend opt-in.";
     }

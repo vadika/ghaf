@@ -1,0 +1,121 @@
+From c682ea4885aae4f957618e0838cb17defdc2f376 Mon Sep 17 00:00:00 2001
+From: Vadik Likholetov <vadikas@gmail.com>
+Date: Thu, 20 Aug 2026 04:43:20 +0300
+Subject: [PATCH] iommu: tegra-pkvm: normalize stream match masks
+
+Some device firmware specifications are populated before the pKVM backend
+registers its OF translation callback. In that case, the provider
+stream-match-mask is not packed into the device IDs, and EL2 programs
+exact-match SMRs.
+
+Keep raw stream IDs as the endpoint identity shared by protected-device
+registration, host attachment, and pVIOMMU. Capture and validate the
+provider mask while probing the SMMU, pass it to EL2, and apply it at the
+hardware routing boundary before every SMR lookup or update.
+
+Signed-off-by: Vadik Likholetov <vadikas@gmail.com>
+---
+ arch/arm64/kvm/hyp/nvhe/iommu/tegra-smmu.c | 18 +++++++++++++++---
+ drivers/iommu/arm-smmu-tegra-pkvm.c        | 11 ++++++++++-
+ include/kvm/tegra-smmu-pkvm.h              |  1 +
+ 3 files changed, 26 insertions(+), 4 deletions(-)
+
+diff --git a/arch/arm64/kvm/hyp/nvhe/iommu/tegra-smmu.c b/arch/arm64/kvm/hyp/nvhe/iommu/tegra-smmu.c
+index 35b677506..e200afe11 100644
+--- a/arch/arm64/kvm/hyp/nvhe/iommu/tegra-smmu.c
++++ b/arch/arm64/kvm/hyp/nvhe/iommu/tegra-smmu.c
+@@ -508,6 +508,12 @@ static struct pkvm_tegra_hyp_smmu *tegra_smmu_from_id(pkvm_handle_t id)
+ 	return &tegra_smmus[array_index_nospec(id, pkvm_tegra_smmu_count)];
+ }
+ 
++static u32 tegra_normalize_fwid(struct pkvm_tegra_hyp_smmu *smmu, u32 fwid)
++{
++	return fwid | FIELD_PREP(PKVM_SMMU_SMR_MASK,
++				 smmu->params->stream_match_mask);
++}
++
+ static int tegra_find_smr(struct pkvm_tegra_hyp_smmu *smmu, u32 fwid)
+ {
+ 	u16 id = FIELD_GET(PKVM_SMMU_SMR_ID, fwid);
+@@ -548,10 +554,12 @@ static void tegra_block_smr(struct pkvm_tegra_hyp_smmu *smmu,
+ 
+ static int tegra_route_sid(struct pkvm_tegra_hyp_smmu *smmu, u32 fwid, u8 cb)
+ {
+-	u16 id = FIELD_GET(PKVM_SMMU_SMR_ID, fwid);
+-	u16 mask = FIELD_GET(PKVM_SMMU_SMR_MASK, fwid);
++	u16 id, mask;
+ 	int smr;
+ 
++	fwid = tegra_normalize_fwid(smmu, fwid);
++	id = FIELD_GET(PKVM_SMMU_SMR_ID, fwid);
++	mask = FIELD_GET(PKVM_SMMU_SMR_MASK, fwid);
+ 	if ((id | mask) & ~smmu->params->streamid_mask)
+ 		return -ERANGE;
+ 	smr = tegra_find_smr(smmu, fwid);
+@@ -578,7 +586,10 @@ static int tegra_route_sid(struct pkvm_tegra_hyp_smmu *smmu, u32 fwid, u8 cb)
+ static int tegra_unroute_sid(struct pkvm_tegra_hyp_smmu *smmu, u32 fwid,
+ 			     int expected_cb)
+ {
+-	int smr = tegra_find_smr(smmu, fwid);
++	int smr;
++
++	fwid = tegra_normalize_fwid(smmu, fwid);
++	smr = tegra_find_smr(smmu, fwid);
+ 
+ 	if (smr < 0 || !smmu->smr_valid[smr])
+ 		return -ENOENT;
+@@ -948,6 +959,7 @@ static int tegra_dev_block_dma(pkvm_handle_t iommu_id, u32 sid,
+ 	if (!smmu)
+ 		return -ENODEV;
+ 	hyp_spin_lock(&smmu->lock);
++	sid = tegra_normalize_fwid(smmu, sid);
+ 	smr = tegra_find_smr(smmu, sid);
+ 	if (host_to_guest) {
+ 		if (smr >= 0 && smmu->smr_valid[smr])
+diff --git a/drivers/iommu/arm-smmu-tegra-pkvm.c b/drivers/iommu/arm-smmu-tegra-pkvm.c
+index d7a39b508..e3a8bbd49 100644
+--- a/drivers/iommu/arm-smmu-tegra-pkvm.c
++++ b/drivers/iommu/arm-smmu-tegra-pkvm.c
+@@ -554,8 +554,9 @@ static int pkvm_tegra_probe(struct platform_device *pdev)
+ 	struct device *dev = &pdev->dev;
+ 	void __iomem *base;
+ 	struct resource *res;
+-	u32 id0, id1, id2;
++	u32 id0, id1, id2, mask;
+ 	unsigned int i;
++	int ret;
+ 
+ 	if (pkvm_tegra_smmu_current >= pkvm_tegra_smmu_count)
+ 		return -ENOSPC;
+@@ -626,9 +627,17 @@ static int pkvm_tegra_probe(struct platform_device *pdev)
+ 	    !hyp_smmu->num_mapping_groups || !hyp_smmu->ias || !hyp_smmu->oas)
+ 		return dev_err_probe(dev, -ENODEV,
+ 				     "unsupported Tegra SMMU configuration\n");
++	ret = of_property_read_u32(dev->of_node, "stream-match-mask", &mask);
++	if (ret)
++		return dev_err_probe(dev, ret,
++				     "failed to read stream-match-mask\n");
++	if (mask > FIELD_MAX(PKVM_SMMU_SMR_MASK))
++		return dev_err_probe(dev, -ERANGE,
++				     "stream-match-mask %#x is too wide\n", mask);
+ 
+ 	host_smmu->dev = dev;
+ 	host_smmu->id = pkvm_tegra_smmu_current;
++	hyp_smmu->stream_match_mask = mask;
+ 	host_smmu->address_bits = min3(hyp_smmu->ias, hyp_smmu->oas,
+ 				       get_kvm_ipa_limit());
+ 	/*
+diff --git a/include/kvm/tegra-smmu-pkvm.h b/include/kvm/tegra-smmu-pkvm.h
+index fa93023cd..066893479 100644
+--- a/include/kvm/tegra-smmu-pkvm.h
++++ b/include/kvm/tegra-smmu-pkvm.h
+@@ -31,6 +31,7 @@ struct pkvm_tegra_smmu_device {
+ 	u32 num_s2_context_banks;
+ 	u32 num_mapping_groups;
+ 	u32 streamid_mask;
++	u32 stream_match_mask;
+ 	u32 ias;
+ 	u32 oas;
+ 	bool coherent_walk;
+-- 
+2.55.0
