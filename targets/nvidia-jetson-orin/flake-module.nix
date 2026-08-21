@@ -82,6 +82,10 @@ let
           name = "Tegra MGBE pKVM guest DMA routing";
           patch = ../../modules/reference/hardware/jetpack/nvidia-jetson-orin/pkvm/patches-linux-7.1/0035-net-stmmac-limit-MGBE-pKVM-guest-DMA-to-32-bits.patch;
         }
+        {
+          name = "Arm pKVM guest pvIOMMU Maple Tree locking";
+          patch = ../../modules/reference/hardware/jetpack/nvidia-jetson-orin/pkvm/patches-linux-7.1/0042-iommu-pkvm-pviommu-fix-maple-tree-locking.patch;
+        }
       ];
     };
 
@@ -384,6 +388,10 @@ let
         {
           name = "Tegra pKVM raw pvIOMMU stream IDs";
           patch = ../../modules/reference/hardware/jetpack/nvidia-jetson-orin/pkvm/patches-linux-7.1/0040-iommu-tegra-pkvm-export-raw-pviommu-stream-IDs.patch;
+        }
+        {
+          name = "Tegra pKVM protected DMA accounting";
+          patch = ../../modules/reference/hardware/jetpack/nvidia-jetson-orin/pkvm/patches-linux-7.1/0041-iommu-tegra-pkvm-account-protected-DMA.patch;
         }
         {
           name = "Tegra pKVM protected-device configuration";

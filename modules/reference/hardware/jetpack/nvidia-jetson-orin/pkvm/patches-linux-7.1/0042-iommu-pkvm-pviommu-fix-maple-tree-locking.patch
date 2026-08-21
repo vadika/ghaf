@@ -1,0 +1,75 @@
+From 8e7a03dcb9f548113e4b19dbaac28f035944255b Mon Sep 17 00:00:00 2001
+From: Mostafa Saleh <smostafa@google.com>
+Date: Thu, 12 Jun 2025 10:22:27 +0000
+Subject: [PATCH] ANDROID: iommu/pkvm-iommu: Fix locking in maple tree usage
+
+There are some problems with the maple tree usage at the moment:
+- pviommu_domain_find() uses mas_find() which must be locked.
+- pviommu_domain_remove_map() had a similar problem, but also it explicitly
+  calls find and erase/insert non-atomically, so convert all of those to the
+  unlocked version and use the tree lock on them.
+- All allocations from unmap must be atomic
+
+Bug: 357781595
+Bug: 348382247
+Signed-off-by: Mostafa Saleh <smostafa@google.com>
+Reported-by: Aashish Sharma <shraash@google.com>
+Change-Id: Ida8cfcfe3dc34ba7574d06eb1970602ab160173c
+---
+ drivers/iommu/pkvm-pviommu.c | 28 +++++++++++++++++-----------
+ 1 file changed, 17 insertions(+), 11 deletions(-)
+
+diff --git a/drivers/iommu/pkvm-pviommu.c b/drivers/iommu/pkvm-pviommu.c
+index 5b793b84ea74..15073c25c6be 100644
+--- a/drivers/iommu/pkvm-pviommu.c
++++ b/drivers/iommu/pkvm-pviommu.c
+@@ -92,21 +92,24 @@ static void pviommu_domain_remove_map(struct pviommu_domain *pv_domain,
+ 	/* Range can cover multiple entries. */
+ 	while (start < end) {
+ 		MA_STATE(mas, &pv_domain->mappings, start, end);
+-		u64 entry = xa_to_value(mas_find(&mas, start));
++		u64 entry;
+ 		u64 old_start, old_end;
+ 
++		mtree_lock(mas.tree);
++		entry = xa_to_value(mas_find(&mas, start));
+ 		old_start = mas.index;
+ 		old_end = mas.last;
+ 		mas_erase(&mas);
+-		/* Insert the rest if not removed. */
+-		if (start > old_start)
+-			mtree_store_range(&pv_domain->mappings, old_start, start - 1,
+-					  xa_mk_value(entry), GFP_KERNEL);
+-
+-		if (old_end > end)
+-			mtree_store_range(&pv_domain->mappings, end + 1, old_end,
+-					  xa_mk_value(entry + end - old_start + 1), GFP_KERNEL);
+-
++		if (start > old_start) {
++			MA_STATE(mas_border, &pv_domain->mappings, old_start, start - 1);
++			WARN_ON(mas_store_gfp(&mas_border, xa_mk_value(entry), GFP_ATOMIC));
++		}
++		if (old_end > end) {
++			MA_STATE(mas_border, &pv_domain->mappings, end + 1, old_end);
++			WARN_ON(mas_store_gfp(&mas_border, xa_mk_value(entry + end - old_start + 1),
++				GFP_ATOMIC));
++		}
++		mtree_unlock(mas.tree);
+ 		start = old_end + 1;
+ 	}
+ }
+@@ -114,8 +117,11 @@ static void pviommu_domain_remove_map(struct pviommu_domain *pv_domain,
+ static u64 pviommu_domain_find(struct pviommu_domain *pv_domain, u64 key)
+ {
+ 	MA_STATE(mas, &pv_domain->mappings, key, key);
+-	void *entry = mas_find(&mas, key);
++	void *entry;
+ 
++	mtree_lock(mas.tree);
++	entry = mas_find(&mas, key);
++	mtree_unlock(mas.tree);
+ 	/* No entry. */
+ 	if (!xa_is_value(entry))
+ 		return 0;
+-- 
+2.55.0
